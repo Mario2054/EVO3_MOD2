@@ -9,3 +9,4 @@ void vuMeterMode6();
 
 void eqAnalyzerFeedSample(int16_t sampleL, int16_t sampleR);
 
+
