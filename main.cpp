@@ -30,7 +30,8 @@
 #include <AsyncTCP.h>          // Bliblioteka TCP dla serwera web
 #include <Update.h>            // Blibioteka dla aktulizacji OTA
 #include <ESPmDNS.h>           // Blibioteka mDNS dla ESP
-#include "EQ_FFTAnalyzer.h"  // FFT analyzer (styles 5/6)
+#include "EQ_AnalyzerDisplay.h"  // FFT analyzer (styles 5/6)
+#include "EQ_FFTAnalyzer.h"    // FFT analyzer functions
 
 
 #include "soc/rtc_cntl_reg.h"   // Biblioteki ESP aby móc zrobic pełny reset 
@@ -125,7 +126,8 @@ const bool f_powerOffAnimation = 0; // Animacja przy power OFF
 #define STATION_NAME_LENGTH 220  // Nazwa stacji wraz z bankiem i numerem stacji do wyświetlenia w pierwszej linii na ekranie
 #define MAX_FILES 100            // Maksymalna liczba plików lub katalogów w tablicy directoriesz
 #define bank_nr_max 16           // Numer jaki może osiągnac maksymalnie zmienna bank_nr czyli ilość banków
-#define displayModeMax 6         // Ogrniczenie maksymalnej ilosci trybów wyswietlacza OLED
+// Maksymalny numer stylu ekranu (dynamicznie: 0–3 lub 0–6)
+uint8_t displayModeMax = 4;         // PODSTAWOWE style 0..4 (FFT w WWW podniesie do 6)         // Ogrniczenie maksymalnej ilosci trybów wyswietlacza OLED
 
 // DEBUG PRINTS - ON/OFF
 #define f_debug_web_on 0         // Flaga właczenia wydruku debug_web
@@ -341,6 +343,9 @@ const int vuYmode3 = 62;                   // Polozenie wyokosci (Y) VU w trybie
 bool vuPeakHoldOn = 1;                     // Flaga okreslajaca czy funkcja Peak & Hold na wskazniku VUmeter jest wlaczona
 bool vuMeterOn = true;                     // Flaga właczajaca wskazniki VU
 bool eqAnalyzerOn = false;               // FFT analyzer on/off for styles 5 & 6 (from Web UI)
+const uint8_t EQ_BANDS = 16;               // Number of EQ bands for analyzer display
+uint8_t eqLevel[EQ_BANDS] = {0};           // Current bar height 0-100
+uint8_t eqPeak[EQ_BANDS] = {0};            // Peak position for each bar
 bool vuMeterMode = false;                  // tryb rysowania vuMeter
 uint8_t displayVuL = 0;                    // wartosc VU do wyswietlenia po procesie smooth
 uint8_t displayVuR = 0;                    // wartosc VU do wyswietlenia po procesie smooth
@@ -410,6 +415,11 @@ String url2play = "";
 File myFile;  // Uchwyt pliku
 
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(U8G2_R2, /* cs=*/CS_OLED, /* dc=*/DC_OLED, /* reset=*/RESET_OLED);  // Hardware SPI 3.12inch OLED
+
+// Getter function for STORAGE to be used by external modules
+fs::FS& getStorage() {
+  return STORAGE;
+}
 
 //U8G2_SH1122_256X64_F_4W_HW_SPI u8g2(U8G2_R2, /* cs=*/ CS_OLED, /* dc=*/ DC_OLED, /* reset=*/ RESET_OLED);		// Hardware SPI  2.08inch OLED
 //U8G2_SSD1363_256X128_F_4W_HW_SPI u8g2(U8G2_R0, /* cs=*/CS_OLED, /* dc=*/DC_OLED, /* reset=*/RESET_OLED);  // Hardware SPI 3.12inch OLED
@@ -8062,8 +8072,11 @@ void setup()
   }
 
   // Odczyt konfiguracji
-  readConfig();          
-  if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku config.txt to go tworzymy
+  readConfig();
+  // Wczytaj osobny config wyglądu analizatora (/analyzer)
+  analyzerStyleLoad();
+  eq_analyzer_init();
+if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku config.txt to go tworzymy
   
 
   if ((esp_reset_reason() != ESP_RST_POWERON) || (!f_sleepAfterPowerFail))
@@ -8969,7 +8982,76 @@ void setup()
 
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
-    server.begin();
+    // ------------------- Analyzer Style Editor (oddzielna strona: /analyzer) -------------------
+server.on("/analyzer", HTTP_GET, [](AsyncWebServerRequest *request){
+  request->send(200, "text/html", analyzerBuildHtmlPage());
+});
+
+server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
+  AnalyzerStyleCfg c = analyzerGetStyle();
+
+  auto getInt = [&](const char* n, int def)->int {
+    if(!request->hasParam(n, true)) return def;
+    return request->getParam(n, true)->value().toInt();
+  };
+  auto getFloat = [&](const char* n, float def)->float {
+    if(!request->hasParam(n, true)) return def;
+    return request->getParam(n, true)->value().toFloat();
+  };
+
+  c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
+  c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
+  c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
+  c.s5_fill     = getFloat("s5fill", c.s5_fill);
+
+  c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
+  c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
+  c.s6_fill     = getFloat("s6fill", c.s6_fill);
+  c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
+  c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
+
+  analyzerSetStyle(c);
+  analyzerStyleSave();
+
+  request->redirect("/analyzer");
+});
+
+// Live podgląd: stosuje parametry od razu (bez zapisu)
+server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
+  AnalyzerStyleCfg c = analyzerGetStyle();
+
+  auto getInt = [&](const char* n, int def)->int {
+    if(!request->hasParam(n, true)) return def;
+    return request->getParam(n, true)->value().toInt();
+  };
+  auto getFloat = [&](const char* n, float def)->float {
+    if(!request->hasParam(n, true)) return def;
+    return request->getParam(n, true)->value().toFloat();
+  };
+
+  c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
+  c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
+  c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
+  c.s5_fill     = getFloat("s5fill", c.s5_fill);
+
+  c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
+  c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
+  c.s6_fill     = getFloat("s6fill", c.s6_fill);
+  c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
+  c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
+
+  analyzerSetStyle(c);
+  request->send(200, "text/plain", "OK");
+});
+
+// (opcjonalnie) podejrzyj aktualne wartości w JSON
+server.on("/analyzerCfg", HTTP_GET, [](AsyncWebServerRequest *request){
+  request->send(200, "application/json", analyzerStyleToJson());
+});
+
+// -----------------------------------------------------------------------------------------
+
+server.begin();
     currentSelection = station_nr - 1; // ustawiamy stacje na liscie na obecnie odtwarzaczną przy starcie radia
     firstVisibleLine = currentSelection + 1; // pierwsza widoczna lina to grająca stacja przy starcie
     if (currentSelection + 1 >= stationsCount - 1) 
@@ -9451,7 +9533,9 @@ void loop()
       else if (ir_code == rcCmdSrc) 
       {
         displayMode++;
-        if (displayMode > displayModeMax) {displayMode = 0;}
+        // Jeśli analizator włączony, pozwól na tryby 5 i 6
+        uint8_t maxMode = eqAnalyzerOn ? 6 : displayModeMax;
+        if (displayMode > maxMode) {displayMode = 0;}
         displayRadio();
         clearFlags();
         ActionNeedUpdateTime = true;
