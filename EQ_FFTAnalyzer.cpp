@@ -106,9 +106,29 @@ static void analyze_frame(const int16_t* x)
   for (int b=0;b<RUNTIME_EQ_BANDS;b++) {
     float mag = goertzel_mag(x, N, kBandHz[b]);
 
-    // Czułość: mniejsze => wyższe słupki, większe => niższe 
-    // Zwiększona czułość (300 zamiast 3000) 
-    float v = mag / (ref * 300.0f);
+    // POPRAWIONE WZMOCNIENIE DLA WYSOKICH CZĘSTOTLIWOŚCI - różne dla każdego pasma
+    float freqGain;
+    float freq = kBandHz[b];
+    
+    if (freq < 100.0f) {
+        freqGain = 200.0f;      // Basy - większe wzmocnienie
+    } else if (freq < 250.0f) {
+        freqGain = 180.0f;      // Niskie - duże wzmocnienie
+    } else if (freq < 500.0f) {
+        freqGain = 160.0f;      // Niski środek
+    } else if (freq < 1000.0f) {
+        freqGain = 140.0f;      // Środek
+    } else if (freq < 2000.0f) {
+        freqGain = 120.0f;      // Górny środek
+    } else if (freq < 4000.0f) {
+        freqGain = 70.0f;       // Wysokie - MOCNIEJSZE WZMOCNIENIE dla prawej strony (+43%)
+    } else if (freq < 8000.0f) {
+        freqGain = 50.0f;       // Bardzo wysokie - JESZCZE MOCNIEJSZE (+60%)
+    } else {
+        freqGain = 30.0f;       // Ultra wysokie - MAKSYMALNE WZMOCNIENIE dla prawej strony (+100%)
+    }
+    
+    float v = mag / (ref * freqGain);
 
     if (v < 0) v = 0;
     if (v > 1) v = 1;
@@ -121,9 +141,18 @@ static void analyze_frame(const int16_t* x)
       Serial.print(" ");
     }
 
-    // Wygładzanie poziomu
-    if (v > g_level[b]) g_level[b] = g_level[b] + (v - g_level[b]) * LEVEL_RISE;
-    else                g_level[b] = g_level[b] + (v - g_level[b]) * LEVEL_FALL;
+    // Wygładzanie poziomu - lepsze dla wysokich częstotliwości
+    float riseSpeed = LEVEL_RISE;
+    float fallSpeed = LEVEL_FALL;
+    
+    // Dla wysokich częstotliwości (prawej strony) - szybsza reakcja
+    if (freq > 2000.0f) {
+        riseSpeed = LEVEL_RISE * 1.2f;  // 20% szybsze narastanie
+        fallSpeed = LEVEL_FALL * 1.5f;  // 50% szybsze opadanie dla lepszej responsywności
+    }
+    
+    if (v > g_level[b]) g_level[b] = g_level[b] + (v - g_level[b]) * riseSpeed;
+    else                g_level[b] = g_level[b] + (v - g_level[b]) * fallSpeed;
 
     // Peak hold
     if (g_level[b] >= g_peak[b]) {

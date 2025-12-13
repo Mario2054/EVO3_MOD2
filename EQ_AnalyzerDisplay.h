@@ -33,7 +33,7 @@ void analyzerStyleSave();
 String analyzerBuildHtmlPage();
 String analyzerStyleToJson();
 
-// Additional functions for analyzer control and display modes
+// Funkcje analizatora
 void eqAnalyzerSetFromWeb(bool enabled);
-void vuMeterMode5(); // Style 5: 16 bars with clock and speaker icon
-void vuMeterMode6(); // Style 6: 16 thin bars with peak segments
+void vuMeterMode5();
+void vuMeterMode6();

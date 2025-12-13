@@ -127,7 +127,7 @@ const bool f_powerOffAnimation = 0; // Animacja przy power OFF
 #define MAX_FILES 100            // Maksymalna liczba plików lub katalogów w tablicy directoriesz
 #define bank_nr_max 16           // Numer jaki może osiągnac maksymalnie zmienna bank_nr czyli ilość banków
 // Maksymalny numer stylu ekranu (dynamicznie: 0–3 lub 0–6)
-uint8_t displayModeMax = 4;         // PODSTAWOWE style 0..4 (FFT w WWW podniesie do 6)         // Ogrniczenie maksymalnej ilosci trybów wyswietlacza OLED
+uint8_t displayModeMax = 6;         // WSZYSTKIE style 0..6 z analizatorem FFT         // Ogrniczenie maksymalnej ilosci trybów wyswietlacza OLED
 
 // DEBUG PRINTS - ON/OFF
 #define f_debug_web_on 0         // Flaga właczenia wydruku debug_web
@@ -342,7 +342,7 @@ const int vuCenterXmode3 = 128;            // Pozycja centralna startu VU w tryb
 const int vuYmode3 = 62;                   // Polozenie wyokosci (Y) VU w trybie Mode 3
 bool vuPeakHoldOn = 1;                     // Flaga okreslajaca czy funkcja Peak & Hold na wskazniku VUmeter jest wlaczona
 bool vuMeterOn = true;                     // Flaga właczajaca wskazniki VU
-bool eqAnalyzerOn = false;               // FFT analyzer on/off for styles 5 & 6 (from Web UI)
+bool eqAnalyzerOn = true;                // FFT analyzer on/off for styles 5 & 6 (from Web UI) - DOMYŚLNIE WŁĄCZONY
 const uint8_t EQ_BANDS = 16;               // Number of EQ bands for analyzer display
 uint8_t eqLevel[EQ_BANDS] = {0};           // Current bar height 0-100
 uint8_t eqPeak[EQ_BANDS] = {0};            // Peak position for each bar
