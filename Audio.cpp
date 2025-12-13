@@ -25,6 +25,7 @@ extern void eqAnalyzerFeedSample(int16_t sampleL, int16_t sampleR);
 #include "psram_unique_ptr.hpp"
 #include "vorbis_decoder/vorbis_decoder.h"
 #include "wav_decoder/wav_decoder.h"
+audio.setProcessCallback(audio_process_extern);
 
 // constants
 constexpr size_t m_frameSizeWav = 2048;
