@@ -1,5 +1,5 @@
 Inne podejści do podpiecia analizatora przez podgryzanie przesyłu z bibioteki audio .
-Prace maja  poprawić działąnie FLAC i AAC przy pracy analizatora.
+Prace maja  naprawić  działąnie FLAC i AAC przy pracy analizatora.
 Lekka poprawa FLAC I AAC 
 Możliwośc edycji stylów 5 i 6 7 8 9  wegług swojego gustu.
 Uruchomienie stylu 5 i 6 7 8  9 na dole setingu.
