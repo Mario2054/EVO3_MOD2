@@ -42,7 +42,7 @@
 #include "rom/gpio.h"  // Biblioteka do mapowania pinu CS_SD
 
 // Deklaracja wersji oprogramowania i nazwy hosta widocznego w routerze oraz na ekranie OLED i stronie www
-#define softwareRev "v3.19.52"  // Wersja oprogramowania radia
+#define softwareRev "v3.19.53"  // Wersja oprogramowania radia
 #define hostname "evoradio"   // Definicja nazwy hosta widoczna na zewnątrz
 
 // Definicja pinow czytnika karty SD
@@ -126,8 +126,11 @@ const bool f_powerOffAnimation = 0; // Animacja przy power OFF
 #define STATION_NAME_LENGTH 220  // Nazwa stacji wraz z bankiem i numerem stacji do wyświetlenia w pierwszej linii na ekranie
 #define MAX_FILES 100            // Maksymalna liczba plików lub katalogów w tablicy directoriesz
 #define bank_nr_max 16           // Numer jaki może osiągnac maksymalnie zmienna bank_nr czyli ilość banków
-// Maksymalny numer stylu ekranu (dynamicznie: 0–3 lub 0–6)
-uint8_t displayModeMax = 6;         // WSZYSTKIE style 0..6 z analizatorem FFT         // Ogrniczenie maksymalnej ilosci trybów wyswietlacza OLED
+// Konfiguracja stylów analizatora
+uint8_t analyzerStylesMode = 2;     // 0=0-4-5, 1=0-4-6, 2=0-4-5-6-7-8-9 (wszystkie)
+uint8_t analyzerCurrentPreset = 0;  // Aktualny preset analizatora (0-4)
+// Maksymalny numer stylu ekranu (dynamicznie obliczany na podstawie analyzerStylesMode)
+uint8_t displayModeMax = 9;         // WSZYSTKIE style 0..9 z analizatorem FFT
 
 // DEBUG PRINTS - ON/OFF
 #define f_debug_web_on 0         // Flaga właczenia wydruku debug_web
@@ -270,7 +273,7 @@ uint8_t rcInputDigit2 = 0xFF;      // Druga cyfra w przy wprowadzaniu numeru sta
 
 
 // ---- Zmienne konfiguracji ---- //
-uint16_t configArray[25] = { 0 };
+uint16_t configArray[27] = { 0 };
 uint8_t rcPage = 0;
 uint16_t configRemoteArray[30] = { 0 };   // Tablica przechowująca kody pilota podczas odczytu z pliku
 uint16_t configAdcArray[20] = { 0 };      // Tablica przechowująca wartosci ADC dla przyciskow klawiatury
@@ -894,7 +897,7 @@ const char config_html[] PROGMEM = R"rawliteral(
   <tr><td>OLED Display Clock in Sleep Mode default:Off</td><td><input type="checkbox" name="f_displayPowerOffClock" value="1" %S19_checked></td></tr>
   <tr><td>OLED Display Power Save Mode, default:Off</td><td><input type="checkbox" name="displayPowerSaveEnabled" value="1" %S9_checked></td></tr>
   <tr><td>OLED Display Power Save Time (1-600sek.), default:20</td><td><input type="number" name="displayPowerSaveTime" min="1" max="600" value="%D9"></td></tr>
-  <tr><td>OLED Display Mode (0-4), 0-Radio scroller, 1-Clock, 2-Three lines, 3-Minimal 4-VU meters</td><td><input type="number" name="displayMode" min="0" max="6" value="%D6"></td></tr>
+  <tr><td>OLED Display Mode: 0-Radio, 1-Clock, 2-Lines, 3-Minimal, 4-VU, 5-Analyzer, 6-Segments, 7-Circles, 8-Lines, 9-Snow</td><td><input type="number" name="displayMode" min="0" max="9" value="%D6"></td></tr>
 
   <tr><th>Other Setting</th><th></th></tr>
   <tr><td>Time Voice Info Every Hour, default:On</td><td><input type="checkbox" name="timeVoiceInfoEveryHour" value="1" %S3_checked></td></tr>
@@ -915,7 +918,9 @@ const char config_html[] PROGMEM = R"rawliteral(
   <tr><td>VU Meter Smooth Function, default:On</td><td><input type="checkbox" name="vuSmooth" value="1" %S15_checked></td></tr>
   <tr><td>VU Meter Smooth Rise Speed [1 low - 32 High], default:24</td><td><input type="number" name="vuRiseSpeed" min="1" max="32" value="%D10"></td></tr>
   <tr><td>VU Meter Smooth Fall Speed [1 low - 32 High], default:6</td><td><input type="number" name="vuFallSpeed" min="1" max="32" value="%D11"></td></tr>
-  <tr><td>FFT / Analyzer for Style 5 & 6, default:Off</td><td><input type="checkbox" name="eqAnalyzerOn" value="1" %S24_checked></td></tr>
+  <tr><td>FFT / Analyzer for Styles 5-9, default:On</td><td><input type="checkbox" name="eqAnalyzerOn" value="1" %S24_checked></td></tr>
+  <tr><td>Available Analyzer Styles: 0=0-4-5, 1=0-4-6, 2=All(0-4-5-6-7-8-9)</td><td><input type="number" name="analyzerStylesMode" min="0" max="2" value="%ANALYZER_STYLES"></td></tr>
+  <tr><td>Analyzer Preset: 0=Classic, 1=Modern, 2=Compact, 3=Retro, 4=Custom</td><td><input type="number" name="analyzerCurrentPreset" min="0" max="4" value="%ANALYZER_PRESET"></td></tr>
   </table>
   <input type="submit" value="Update">
   </form>
@@ -3174,6 +3179,12 @@ void my_audio_info(Audio::msg_t m)
     {
       String msg = String(m.msg);   // zamiana na String
       msg.trim(); // usuń spacje i \r\n
+      // Sprawdź czy to błąd dekodera
+      if (msg.indexOf("Error") != -1 || msg.indexOf("error") != -1) {
+        Serial.printf("[AUDIO ERROR] %s\n", msg.c_str());
+        // Reset analizatora przy błędzie
+        eq_analyzer_reset();
+      }
 
       // --- BitRate ---
       int bitrateIndex = msg.indexOf("Bitrate (b/s):");  
@@ -3201,7 +3212,7 @@ void my_audio_info(Audio::msg_t m)
         Serial.printf("bitrate FLAC: .... %s\n", m.msg); // icy-bitrate or bitrate from metadata
         int endIndex = msg.indexOf('\n', bitrateIndexFlac);
         if (endIndex == -1) endIndex = msg.length();
-        bitrateString = msg.substring(bitrateIndex + 19, endIndex);
+        bitrateString = msg.substring(bitrateIndexFlac + 19, endIndex); // POPRAWKA: bitrateIndexFlac zamiast bitrateIndex
         bitrateString.trim();
 
         // przliczenie bps na Kbps
@@ -3224,10 +3235,15 @@ void my_audio_info(Audio::msg_t m)
         sampleRateString = msg.substring(sampleRateIndex + 17, endIndex);
         sampleRateString.trim();
            
-        SampleRate = sampleRateString.toInt();
+        uint32_t fullSampleRate = sampleRateString.toInt();
+        SampleRate = fullSampleRate;
         SampleRateRest = SampleRate % 1000;
         SampleRateRest = SampleRateRest / 100;
         SampleRate = SampleRate / 1000;
+        
+        // Ustaw sample rate w analizatorze
+        eq_analyzer_set_sample_rate(fullSampleRate);
+        Serial.printf("[AUDIO] Sample Rate detected: %u Hz\n", fullSampleRate);
         
         f_audioInfoRefreshDisplayRadio = true;
         wsAudioRefresh = true;  //Web Socket - audio refresh    
@@ -3241,6 +3257,10 @@ void my_audio_info(Audio::msg_t m)
         if (endIndex == -1) endIndex = msg.length();
         bitsPerSampleString = msg.substring(bitsPerSampleIndex + 15, endIndex);
         bitsPerSampleString.trim();
+        
+        uint8_t bitsPerSample = bitsPerSampleString.toInt();
+        Serial.printf("[AUDIO] Bits per sample: %u\n", bitsPerSample);
+        
         f_audioInfoRefreshDisplayRadio = true;	
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3251,6 +3271,7 @@ void my_audio_info(Audio::msg_t m)
         mp3 = true; 
         flac = false; aac = false; vorbis = false; opus = false;
         streamCodec = "MP3";
+        Serial.println("[AUDIO] Codec: MP3 detected");
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3259,6 +3280,9 @@ void my_audio_info(Audio::msg_t m)
         flac = true; 
         mp3 = false; aac = false; vorbis = false; opus = false;
         streamCodec = "FLAC";
+        Serial.println("[AUDIO] Codec: FLAC detected");
+        // Resetuj analizator dla nowego formatu
+        eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3267,6 +3291,9 @@ void my_audio_info(Audio::msg_t m)
         aac = true;
         flac = false; mp3 = false; vorbis = false; opus = false;
         streamCodec = "AAC";
+        Serial.println("[AUDIO] Codec: AAC detected");
+        // Resetuj analizator dla nowego formatu
+        eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3275,6 +3302,8 @@ void my_audio_info(Audio::msg_t m)
         vorbis = true;
         aac = false; flac = false; mp3 = false; opus = false;
         streamCodec = "VRB";
+        Serial.println("[AUDIO] Codec: VORBIS detected");
+        eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3283,6 +3312,8 @@ void my_audio_info(Audio::msg_t m)
         opus = true;
         aac = false; flac = false; mp3 = false; vorbis = false;
         streamCodec = "OPUS";
+        Serial.println("[AUDIO] Codec: OPUS detected");
+        eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3291,6 +3322,15 @@ void my_audio_info(Audio::msg_t m)
       Serial.printf("info: ....... %s\n", m.msg);      
     }
     break;
+
+    case Audio::evt_log:
+      Serial.printf("[AUDIO LOG] %s\n", m.msg);
+      // Sprawdź czy to błąd na podstawie treści logu
+      if (strstr(m.msg, "error") || strstr(m.msg, "Error") || strstr(m.msg, "ERROR") ||
+          strstr(m.msg, "failed") || strstr(m.msg, "Failed") || strstr(m.msg, "FAILED")) {
+        eq_analyzer_reset();  // Reset analizatora przy błędzie
+      }
+      break;
 
 
     case Audio::evt_eof:
@@ -3366,7 +3406,7 @@ void my_audio_info(Audio::msg_t m)
     case Audio::evt_icydescription: Serial.printf("icy descr: .. %s\n", m.msg); break;
     case Audio::evt_image: for(int i = 0; i < m.vec.size(); i += 2) { Serial.printf("cover image:  segment %02i, pos %07lu, len %05lu\n", i / 2, m.vec[i], m.vec[i + 1]);} break; // APIC
     case Audio::evt_lyrics:         Serial.printf("sync lyrics:  %s\n", m.msg); break;
-    case Audio::evt_log   :         Serial.printf("audio_logs:   %s\n", m.msg); break;
+
     default:                        Serial.printf("message:..... %s\n", m.msg); break;
   }
 }
@@ -6578,7 +6618,9 @@ void saveConfig()
       myFile.println("Volume fade on station change and power off =" + String(f_volumeFadeOn) + ";");
       myFile.println("Save Always Station Bank Volume or only during power off =" + String(f_saveVolumeStationAlways) + ";");
       
-      myFile.println("FFT Analyzer for Style 5&6 =" + String(eqAnalyzerOn ? 1 : 0) + ";");
+      myFile.println("FFT Analyzer for Style 5-8 =" + String(eqAnalyzerOn ? 1 : 0) + ";");
+      myFile.println("Analyzer Styles Mode =" + String(analyzerStylesMode) + ";");
+      myFile.println("Analyzer Current Preset =" + String(analyzerCurrentPreset) + ";");
 
       myFile.close();
       Serial.println("Aktualizacja config.txt na karcie SD");
@@ -6621,7 +6663,9 @@ void saveConfig()
       myFile.print("Radio goes to sleep after Power Fail =");    myFile.print(f_sleepAfterPowerFail); myFile.println(";");
       myFile.println("Volume fade on station change and power off =" + String(f_volumeFadeOn) + ";");
       myFile.println("Save Always Station Bank Volume or only during power off =" + String(f_saveVolumeStationAlways) + ";");
-      myFile.println("FFT Analyzer for Style 5&6 =" + String(eqAnalyzerOn ? 1 : 0) + ";");
+      myFile.println("FFT Analyzer for Style 5-8 =" + String(eqAnalyzerOn ? 1 : 0) + ";");
+      myFile.println("Analyzer Styles Mode =" + String(analyzerStylesMode) + ";");
+      myFile.println("Analyzer Current Preset =" + String(analyzerCurrentPreset) + ";");
       myFile.close();
       Serial.println("Utworzono i zapisano config.txt na karcie SD");
     } 
@@ -6789,9 +6833,17 @@ void readConfig()
   f_volumeFadeOn = configArray[22];
   f_saveVolumeStationAlways = configArray[23];
 
-  // FFT analyzer enable (style 5/6). If config file has no entry yet, defaults to OFF.
+  // FFT analyzer enable (styles 5-8). If config file has no entry yet, defaults to ON.
   eqAnalyzerOn = (configArray[24] != 0);
   eqAnalyzerSetFromWeb(eqAnalyzerOn);
+  
+  // Nowe parametry analizatora (używamy wartości bezpośrednio, bez sprawdzania != 0)
+  analyzerStylesMode = configArray[25];       // 0=0-4-5, 1=0-4-6, 2=wszystkie
+  analyzerCurrentPreset = configArray[26];    // 0=Classic, 1=Modern, 2=Compact, 3=Retro, 4=Custom
+  
+  // Zastosuj ustawienia analizatora
+  analyzerSetStyleMode(analyzerStylesMode);
+  analyzerApplyPreset(analyzerCurrentPreset);
 
   if (maxVolumeExt == 1)
   { 
@@ -8571,6 +8623,8 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
         html.replace(F("%D10"), String(vuRiseSpeed));
         html.replace(F("%D11"), String(vuFallSpeed));
         html.replace(F("%D12"), String(dimmerSleepDisplayBrightness));
+        html.replace(F("%ANALYZER_STYLES"), String(analyzerStylesMode));
+        html.replace(F("%ANALYZER_PRESET"), String(analyzerCurrentPreset));
         
         html.replace(F("%D1"), String(displayBrightness));
         html.replace(F("%D2"), String(dimmerDisplayBrightness));
@@ -8723,6 +8777,16 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
       f_saveVolumeStationAlways  = request->hasParam("f_saveVolumeStationAlways", true);
       eqAnalyzerOn               = request->hasParam("eqAnalyzerOn", true);
       eqAnalyzerSetFromWeb(eqAnalyzerOn);
+      
+      // Nowe parametry analizatora
+      if (request->hasParam("analyzerStylesMode", true)) {
+        analyzerStylesMode = request->getParam("analyzerStylesMode", true)->value().toInt();
+        analyzerSetStyleMode(analyzerStylesMode);
+      }
+      if (request->hasParam("analyzerCurrentPreset", true)) {
+        analyzerCurrentPreset = request->getParam("analyzerCurrentPreset", true)->value().toInt();
+        analyzerApplyPreset(analyzerCurrentPreset);
+      }
 
       // Jeśli parametr istnieje checkbox był zaznaczony to TRUE
       // Jeśli go nie ma checkbox nie był zaznaczony to FALSE
@@ -8998,17 +9062,46 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
     if(!request->hasParam(n, true)) return def;
     return request->getParam(n, true)->value().toFloat();
   };
+  auto getBool = [&](const char* n)->bool {
+    return request->hasParam(n, true) && request->getParam(n, true)->value() == "1";
+  };
 
+  // Styl 5
   c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
   c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
   c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
+  c.s5_showPeaks = getBool("s5peaks");
 
+  // Styl 6
   c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
   c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
   c.s6_fill     = getFloat("s6fill", c.s6_fill);
   c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
   c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
+  c.s6_showPeaks = getBool("s6peaks");
+
+  // Styl 7 (Okrągły)
+  c.s7_circleRadius = (uint8_t)getInt("s7radius", c.s7_circleRadius);
+  c.s7_circleGap = (uint8_t)getInt("s7gap", c.s7_circleGap);
+  c.s7_filled = getBool("s7filled");
+  c.s7_maxHeight = (uint8_t)getInt("s7max", c.s7_maxHeight);
+
+  // Styl 8 (Liniowy)
+  c.s8_lineThickness = (uint8_t)getInt("s8thick", c.s8_lineThickness);
+  c.s8_lineGap = (uint8_t)getInt("s8gap", c.s8_lineGap);
+  c.s8_gradient = getBool("s8grad");
+  c.s8_maxHeight = (uint8_t)getInt("s8max", c.s8_maxHeight);
+
+  // Styl 9 (Gwiazda 6-ramienna)
+  c.s9_starRadius = (uint8_t)getInt("s9radius", c.s9_starRadius);
+  c.s9_armWidth = (uint8_t)getInt("s9armw", c.s9_armWidth);
+  c.s9_armLength = (uint8_t)getInt("s9arml", c.s9_armLength);
+  c.s9_spikeLength = (uint8_t)getInt("s9spike", c.s9_spikeLength);
+  c.s9_showSpikes = getBool("s9spikes");
+  c.s9_filled = getBool("s9filled");
+  c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
+  c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
 
   analyzerSetStyle(c);
   analyzerStyleSave();
@@ -9028,17 +9121,46 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
     if(!request->hasParam(n, true)) return def;
     return request->getParam(n, true)->value().toFloat();
   };
+  auto getBool = [&](const char* n)->bool {
+    return request->hasParam(n, true) && request->getParam(n, true)->value() == "1";
+  };
 
+  // Styl 5
   c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
   c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
   c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
+  c.s5_showPeaks = getBool("s5peaks");
 
+  // Styl 6
   c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
   c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
   c.s6_fill     = getFloat("s6fill", c.s6_fill);
   c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
   c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
+  c.s6_showPeaks = getBool("s6peaks");
+
+  // Styl 7 (Okrągły)
+  c.s7_circleRadius = (uint8_t)getInt("s7radius", c.s7_circleRadius);
+  c.s7_circleGap = (uint8_t)getInt("s7gap", c.s7_circleGap);
+  c.s7_filled = getBool("s7filled");
+  c.s7_maxHeight = (uint8_t)getInt("s7max", c.s7_maxHeight);
+
+  // Styl 8 (Liniowy)
+  c.s8_lineThickness = (uint8_t)getInt("s8thick", c.s8_lineThickness);
+  c.s8_lineGap = (uint8_t)getInt("s8gap", c.s8_lineGap);
+  c.s8_gradient = getBool("s8grad");
+  c.s8_maxHeight = (uint8_t)getInt("s8max", c.s8_maxHeight);
+
+  // Styl 9 (Gwiazda 6-ramienna)
+  c.s9_starRadius = (uint8_t)getInt("s9radius", c.s9_starRadius);
+  c.s9_armWidth = (uint8_t)getInt("s9armw", c.s9_armWidth);
+  c.s9_armLength = (uint8_t)getInt("s9arml", c.s9_armLength);
+  c.s9_spikeLength = (uint8_t)getInt("s9spike", c.s9_spikeLength);
+  c.s9_showSpikes = getBool("s9spikes");
+  c.s9_filled = getBool("s9filled");
+  c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
+  c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
 
   analyzerSetStyle(c);
   request->send(200, "text/plain", "OK");
@@ -9047,6 +9169,31 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
 // (opcjonalnie) podejrzyj aktualne wartości w JSON
 server.on("/analyzerCfg", HTTP_GET, [](AsyncWebServerRequest *request){
   request->send(200, "application/json", analyzerStyleToJson());
+});
+
+// Diagnostyka analizatora
+server.on("/analyzerDiag", HTTP_GET, [](AsyncWebServerRequest *request){
+  eq_analyzer_print_diagnostics();
+  String diag = "Diagnostics printed to Serial. Check console.";
+  request->send(200, "text/plain", diag);
+});
+
+// Test generator toggle
+server.on("/analyzerTest", HTTP_GET, [](AsyncWebServerRequest *request){
+  bool currentState = false; // Należy dodać getter dla stanu test generatora
+  eq_analyzer_enable_test_generator(!currentState);
+  String status = currentState ? "Test generator DISABLED" : "Test generator ENABLED";
+  request->send(200, "text/plain", status);
+});
+
+// Obsługa presetów
+server.on("/analyzerPreset", HTTP_POST, [](AsyncWebServerRequest *request){
+  if (request->hasParam("preset", true)) {
+    uint8_t presetId = request->getParam("preset", true)->value().toInt();
+    analyzerApplyPreset(presetId);
+    analyzerStyleSave();
+  }
+  request->redirect("/analyzer");
 });
 
 // -----------------------------------------------------------------------------------------
@@ -9652,6 +9799,9 @@ void loop()
         }
         if (displayMode == 5) {vuMeterMode5();}
         if (displayMode == 6) {vuMeterMode6();}
+        if (displayMode == 7) {vuMeterMode7();}  // Nowy styl: Okrągły
+        if (displayMode == 8) {vuMeterMode8();}  // Nowy styl: Liniowy
+        if (displayMode == 9) {vuMeterMode9();}  // Nowy styl: Spadające gwiazdki jak śnieg
       }
       else if (displayMode == 0) {showIP(1,47);} //y = vuRy
     }

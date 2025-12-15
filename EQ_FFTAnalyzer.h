@@ -31,6 +31,13 @@ bool eq_analyzer_is_receiving_samples();
 uint32_t eq_analyzer_get_sample_count();
 void eq_analyzer_enable_test_generator(bool enable);
 
+// Funkcje konfiguracji sample rate
+void eq_analyzer_set_sample_rate(uint32_t sampleRate);
+uint32_t eq_analyzer_get_sample_rate();
+
+// Diagnostyka analizatora
+void eq_analyzer_print_diagnostics();
+
 // Funkcje konfiguracji analizatora
 void eq_set_style5_params(uint8_t segments, uint8_t barWidth, uint8_t barGap);
 void eq_set_style6_params(uint8_t segments, uint8_t barWidth, uint8_t barGap);

@@ -26,12 +26,15 @@ static bool g_useTestGenerator = false;
 static uint32_t g_testPhase = 0;
 
 // ====================== TUNING (CPU / jakość) ======================
-static constexpr uint32_t AUDIO_SAMPLE_RATE_HZ = 44100;
+static uint32_t g_audioSampleRate = 44100;  // Dynamiczna częstotliwość próbkowania
+static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
 
 // CPU: 2 = co druga próbka, 4 = co czwarta (mniej CPU, mniej detali)
 static constexpr uint8_t  DOWNSAMPLE = 2;
 
-static constexpr uint32_t FS_HZ = AUDIO_SAMPLE_RATE_HZ / DOWNSAMPLE;
+static uint32_t get_effective_sample_rate() {
+  return g_audioSampleRate / DOWNSAMPLE;
+}
 
 // Jakość/CPU: 256/384/512 (256 szybsze, mniej RAM, lepsze dla real-time)
 static constexpr uint16_t N = 256;
@@ -62,7 +65,8 @@ static const float kBandHz[RUNTIME_EQ_BANDS] = {
 
 static float goertzel_mag(const int16_t* x, int n, float freqHz)
 {
-  float kf = (freqHz * (float)n) / (float)FS_HZ;
+  uint32_t fs_hz = get_effective_sample_rate();
+  float kf = (freqHz * (float)n) / (float)fs_hz;
   int k = (int)(kf + 0.5f);
   if (k < 1) k = 1;
   if (k > (n/2 - 1)) k = (n/2 - 1);
@@ -402,6 +406,54 @@ void eq_analyzer_enable_test_generator(bool enable)
   if (enable) {
     g_testPhase = 0;
   }
+}
+
+void eq_analyzer_set_sample_rate(uint32_t sampleRate)
+{
+  if (sampleRate >= 8000 && sampleRate <= 192000) {
+    g_audioSampleRate = sampleRate;
+    Serial.printf("[ANALYZER] Sample rate set to: %u Hz (effective: %u Hz)\n", 
+                  g_audioSampleRate, get_effective_sample_rate());
+  } else {
+    Serial.printf("[ANALYZER] Invalid sample rate: %u Hz, keeping: %u Hz\n", 
+                  sampleRate, g_audioSampleRate);
+  }
+}
+
+uint32_t eq_analyzer_get_sample_rate()
+{
+  return g_audioSampleRate;
+}
+
+void eq_analyzer_print_diagnostics()
+{
+  Serial.println("\n=== ANALYZER DIAGNOSTICS ===");
+  Serial.printf("Enabled: %s\n", eqAnalyzerEnabled ? "YES" : "NO");
+  Serial.printf("Sample Rate: %u Hz (effective: %u Hz)\n", g_audioSampleRate, get_effective_sample_rate());
+  Serial.printf("Total Samples Received: %u\n", g_sampleCount);
+  Serial.printf("Test Generator: %s\n", g_useTestGenerator ? "ACTIVE" : "OFF");
+  
+  if (g_q) {
+    UBaseType_t queueCount = uxQueueMessagesWaiting(g_q);
+    Serial.printf("Queue Status: %u/%u samples\n", queueCount, N);
+  } else {
+    Serial.println("Queue Status: NOT INITIALIZED");
+  }
+  
+  Serial.print("Current Levels: ");
+  for (int i = 0; i < RUNTIME_EQ_BANDS; i++) {
+    Serial.printf("%.2f ", g_level[i]);
+    if (i == 7) Serial.print("\n                ");
+  }
+  Serial.println();
+  
+  Serial.print("Band Frequencies: ");
+  for (int i = 0; i < RUNTIME_EQ_BANDS; i++) {
+    Serial.printf("%.0fHz ", kBandHz[i]);
+    if (i == 7) Serial.print("\n                  ");
+  }
+  Serial.println();
+  Serial.println("============================\n");
 }
 
 // Funkcje konfiguracji analizatora
