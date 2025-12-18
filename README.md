@@ -8,6 +8,7 @@ Dodana obsługa korektora 16  pełen zakres sterowanie z pilota Jest możliwośc
 <img width="619" height="912" alt="image" src="https://github.com/user-attachments/assets/6618ba11-f6d5-48f5-acf6-c581e9bdfa15" /> 
 
 
-Po uruchominiu wybiramy przycisk uruchamiający equalizer (AUD) Ukazuje sie nam menu EQ obsługa taka sama jak EQ 3 
+Po uruchominiu wybiramy przycisk uruchamiający equalizer (AUD) 
+Ukazuje sie nam menu EQ obsługa taka sama jak EQ 3 
 
 
