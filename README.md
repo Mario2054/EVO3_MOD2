@@ -2,11 +2,10 @@ Inne podejści do podpiecia analizatora przez podgryzanie przesyłu z bibioteki 
 Prace maja  naprawić  działąnie FLAC i AAC przy pracy analizatora.
 Lekka poprawa FLAC I AAC 
 Możliwośc edycji stylów 5 i 6 7 8 9  wegług swojego gustu.
-Uruchomienie stylu 5 i 6 7 8  9 na dole setingu.
+Uruchomienie stylu 5 i 6 7 8  9 
+Dodana obsługa korektora 16  pełen zakres sterowanie z pilota Jest możliwośc przełączania miadzy EQUALIZEREM 3 I EQUALIZEREM !6 za pomoca lawisza 0 nacisnietego 3 razy pod rzad 0 0 0 .zmiana 
 
+<img width="619" height="912" alt="image" src="https://github.com/user-attachments/assets/6618ba11-f6d5-48f5-acf6-c581e9bdfa15" /> 
+Po uruchominiu wybiramy przycisk uruchamiający equalizer (AUD) Ukazuje sie nam menu EQ obsługa taka sama jak EQ 3 
 
-<img width="602" height="846" alt="image" src="https://github.com/user-attachments/assets/64cfbbb5-ad07-4fde-9635-05f3cae84b5a" />
-
-
-<img width="408" height="876" alt="image" src="https://github.com/user-attachments/assets/f14c0c73-221c-442a-9f98-813b64ad2ea6" />
 
