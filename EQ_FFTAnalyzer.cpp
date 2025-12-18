@@ -1,494 +1,366 @@
 #include "EQ_FFTAnalyzer.h"
-
-// Definicja lokalna EQ_BANDS (taka sama jak w main.cpp)
-static const uint8_t EQ_BANDS = 16;
-
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-#include <freertos/task.h>
+#include "EQ_AnalyzerDisplay.h"  // for analyzerGetPeakHoldTime()
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_timer.h"
 #include <math.h>
+#include <string.h>
 
-bool eqAnalyzerEnabled = false;
-uint8_t eq6_maxSegments = 16;  // Zmniejszone dla lepszej widoczności
-uint8_t eq5_maxSegments = 20;  // Segmenty dla trybu 5
-uint8_t eq_barWidth5 = 12;     // Szerokość pasków tryb 5
-uint8_t eq_barGap5 = 4;        // Odstęp między paskami tryb 5
-uint8_t eq_barWidth6 = 8;      // Szerokość pasków tryb 6
-uint8_t eq_barGap6 = 3;        // Odstęp między paskami tryb 6
+// ======================= USTAWIENIA (lekkie, bez wpływu na audio) =======================
 
-// Diagnostyczne - licznik próbek otrzymanych
-static uint32_t g_sampleCount = 0;
-static uint32_t g_lastSampleCount = 0;
-static uint32_t g_lastFrameProcessed = 0;  // Czas ostatniej przetworzonej ramki
+// Rozmiar ramki do analizy – 256 próbek (mono) daje szybki refresh i mały koszt.
+static const uint16_t FRAME_N = 256;
 
-// Test generator - symuluje audio gdy brak prawdziwego sygnału
-static bool g_useTestGenerator = false;
-static uint32_t g_testPhase = 0;
+// Downsample: dla 44.1kHz/48kHz bierzemy co 2 próbkę do analizy -> mniej CPU.
+// (Skuteczny samplerate = SR / DS)
+static uint8_t g_downsample = 2;
 
-// ====================== TUNING (CPU / jakość) ======================
-static uint32_t g_audioSampleRate = 44100;  // Dynamiczna częstotliwość próbkowania
-static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
+// Kolejka próbek: trzymamy tylko mono int16
+typedef struct {
+  int16_t s[FRAME_N];
+  uint16_t n; // zawsze FRAME_N jeśli pełna ramka
+} frame_t;
 
-// CPU: 2 = co druga próbka, 4 = co czwarta (mniej CPU, mniej detali)
-static constexpr uint8_t  DOWNSAMPLE = 2;
-
-static uint32_t get_effective_sample_rate() {
-  return g_audioSampleRate / DOWNSAMPLE;
-}
-
-// Jakość/CPU: 256/384/512 (256 szybsze, mniej RAM, lepsze dla real-time)
-static constexpr uint16_t N = 256;
-
-// CPU: analizuj nie częściej niż co X ms (40ms ~ 25 fps)
-static constexpr uint32_t ANALYZE_PERIOD_MS = 40;
-
-// Kolejka próbek mono do taska analizatora
 static QueueHandle_t g_q = nullptr;
+static TaskHandle_t  g_task = nullptr;
 
-static float g_level[RUNTIME_EQ_BANDS] = {0};
-static float g_peak[RUNTIME_EQ_BANDS]  = {0};
-static uint32_t g_peakHoldUntil[RUNTIME_EQ_BANDS] = {0};
+static volatile bool g_enabled = false;
+static volatile bool g_runtimeActive = false;
+static volatile bool g_testGen = false;
 
-// Dynamika (możesz podkręcić pod siebie)
-static constexpr float LEVEL_RISE = 0.55f;    // szybko rośnie
-static constexpr float LEVEL_FALL = 0.10f;    // jak szybko opada
-static constexpr float PEAK_FALL  = 0.06f;    // jak opada peak
-static constexpr uint32_t PEAK_HOLD_MS = 200; // jak długo trzyma peak
+static volatile uint32_t g_sr_hz = 44100;         // wejściowy SR
+static volatile uint32_t g_sr_eff = 22050;        // efektywny SR po downsample
 
-// 16 pasm – rozłożone logarytmicznie (jak "prawdziwy" analizator)
-static const float kBandHz[RUNTIME_EQ_BANDS] = {
-  60, 90, 130, 180,
-  250, 350, 500, 700,
-  1000, 1400, 2000, 2800,
-  4000, 5600, 8000, 12000
+// Współczynniki dynamiki/AGC (klucz do "żywego" analizatora bez przesteru)
+static float g_ref = 1800.0f;     // adaptacyjna referencja energii (AGC) - wyższa dla kontroli basów
+static float g_ref_min = 150.0f;  // minimalna referencja (gating)
+static float g_ref_max = 8000.0f; // maksymalna referencja - wyższa dla głośnych fragmentów
+
+// Wygładzanie słupków i peak-hold
+static float g_levels[EQ_BANDS] = {0};
+static float g_peaks [EQ_BANDS] = {0};
+static uint32_t g_peak_timers[EQ_BANDS] = {0}; // timery peak hold w ms
+
+// Statystyka: czy naprawdę dostajemy próbki
+static volatile uint64_t g_lastPushUs = 0;
+static volatile uint32_t g_samplesPushed = 0;
+static volatile uint32_t g_samplesPushedPrev = 0;
+
+// snapshot lock (bardzo lekki)
+static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Bufor do składania ramki
+static int16_t g_acc[FRAME_N];
+static uint16_t g_acc_n = 0;
+static uint8_t  g_ds_phase = 0;
+
+// ======================= GOERTZEL (tanie "FFT-like" na pasma) =======================
+
+static inline float clamp01(float x){ return (x < 0.f) ? 0.f : (x > 1.f ? 1.f : x); }
+
+// 16 pasm – logarytmicznie (od ~60 Hz do ~12 kHz przy 22.05 kHz eff)
+static const float kBandHz[EQ_BANDS] = {
+   60,   90,  140,  220,
+  330,  500,  750, 1100,
+ 1600, 2300, 3300, 4700,
+ 6600, 8200, 9800, 12000
 };
 
-static float goertzel_mag(const int16_t* x, int n, float freqHz)
-{
-  uint32_t fs_hz = get_effective_sample_rate();
-  float kf = (freqHz * (float)n) / (float)fs_hz;
-  int k = (int)(kf + 0.5f);
-  if (k < 1) k = 1;
-  if (k > (n/2 - 1)) k = (n/2 - 1);
+// Zbalansowane tłumienie z bardzo mocno podbitymi wysokimi częstotliwościami
+static const float kBandGain[EQ_BANDS] = {
+  0.35f, 0.45f, 0.55f, 0.65f,  // Umiarkowanie tłumione basy (60-220Hz)
+  0.75f, 1.10f, 1.20f, 1.15f,  // Podbite średnie częst. (330Hz-1.1kHz)
+  1.35f, 1.50f, 1.65f, 1.70f,  // Bardzo mocno podbite wyższe częst. (1.6-4.7kHz)  
+  1.75f, 1.80f, 1.85f, 1.90f   // Maksymalnie podbite najwyższe (6.6-12kHz)
+};
 
-  float omega  = (2.0f * 3.14159265f * (float)k) / (float)n;
-  float cosine = cosf(omega);
-  float coeff  = 2.0f * cosine;
+static float goertzel_mag(const int16_t* x, uint16_t n, float freq, float sr_eff){
+  // Standard Goertzel magnitude (bez sqrt – wystarczy względnie)
+  const float w = 2.0f * (float)M_PI * (freq / sr_eff);
+  const float cw = cosf(w);
+  const float coeff = 2.0f * cw;
 
-  float q0 = 0, q1 = 0, q2 = 0;
-  for (int i = 0; i < n; i++) {
-    q0 = coeff * q1 - q2 + (float)x[i];
+  float q0=0, q1=0, q2=0;
+  for(uint16_t i=0;i<n;i++){
+    q0 = coeff*q1 - q2 + (float)x[i];
     q2 = q1;
     q1 = q0;
   }
-
-  float real = q1 - q2 * cosine;
-  float imag = q2 * sinf(omega);
-  return sqrtf(real*real + imag*imag);
+  // energia ~ q1^2 + q2^2 - q1*q2*coeff
+  float p = q1*q1 + q2*q2 - q1*q2*coeff;
+  if(p < 0) p = 0;
+  return p; // bez sqrt – szybciej
 }
 
-static void analyze_frame(const int16_t* x)
-{
-  // Auto-referencja głośności ramki (żeby nie kalibrować na każdą stację)
-  double sumAbs = 0;
-  for (int i=0;i<N;i++) sumAbs += fabs((double)x[i]);
-  float ref = (float)(sumAbs / (double)N);
-  if (ref < 50.0f) ref = 50.0f;
+// ======================= Mapowanie energii -> poziom (dynamika) =======================
 
-  uint32_t now = millis();
-
-  // Debug co 3 sekundy - pokazuj wartości mag i ref
-  static uint32_t lastAnalyzeDebug = 0;
-  bool showDebug = (now - lastAnalyzeDebug > 3000);
-  if (showDebug) {
-    Serial.print("Analyzer ref=");
-    Serial.print(ref, 1);
-    Serial.print(" mags: ");
-    lastAnalyzeDebug = now;
-  }
-
-  for (int b=0;b<RUNTIME_EQ_BANDS;b++) {
-    float mag = goertzel_mag(x, N, kBandHz[b]);
-
-    // POPRAWIONE WZMOCNIENIE DLA WYSOKICH CZĘSTOTLIWOŚCI - różne dla każdego pasma
-    float freqGain;
-    float freq = kBandHz[b];
-    
-    if (freq < 100.0f) {
-        freqGain = 200.0f;      // Basy - większe wzmocnienie
-    } else if (freq < 250.0f) {
-        freqGain = 180.0f;      // Niskie - duże wzmocnienie
-    } else if (freq < 500.0f) {
-        freqGain = 160.0f;      // Niski środek
-    } else if (freq < 1000.0f) {
-        freqGain = 140.0f;      // Środek
-    } else if (freq < 2000.0f) {
-        freqGain = 120.0f;      // Górny środek
-    } else if (freq < 4000.0f) {
-        freqGain = 70.0f;       // Wysokie - MOCNIEJSZE WZMOCNIENIE dla prawej strony (+43%)
-    } else if (freq < 8000.0f) {
-        freqGain = 50.0f;       // Bardzo wysokie - JESZCZE MOCNIEJSZE (+60%)
-    } else {
-        freqGain = 30.0f;       // Ultra wysokie - MAKSYMALNE WZMOCNIENIE dla prawej strony (+100%)
-    }
-    
-    float v = mag / (ref * freqGain);
-
-    if (v < 0) v = 0;
-    if (v > 1) v = 1;
-
-    // Debug tylko kilka pierwszych pasm
-    if (showDebug && b < 4) {
-      Serial.print(mag, 0);
-      Serial.print(":");
-      Serial.print(v, 2);
-      Serial.print(" ");
-    }
-
-    // Wygładzanie poziomu - lepsze dla wysokich częstotliwości
-    float riseSpeed = LEVEL_RISE;
-    float fallSpeed = LEVEL_FALL;
-    
-    // Dla wysokich częstotliwości (prawej strony) - szybsza reakcja
-    if (freq > 2000.0f) {
-        riseSpeed = LEVEL_RISE * 1.2f;  // 20% szybsze narastanie
-        fallSpeed = LEVEL_FALL * 1.5f;  // 50% szybsze opadanie dla lepszej responsywności
-    }
-    
-    if (v > g_level[b]) g_level[b] = g_level[b] + (v - g_level[b]) * riseSpeed;
-    else                g_level[b] = g_level[b] + (v - g_level[b]) * fallSpeed;
-
-    // Peak hold
-    if (g_level[b] >= g_peak[b]) {
-      g_peak[b] = g_level[b];
-      g_peakHoldUntil[b] = now + PEAK_HOLD_MS;
-    } else if (now >= g_peakHoldUntil[b]) {
-      g_peak[b] = g_peak[b] + (g_level[b] - g_peak[b]) * PEAK_FALL;
-      if (g_peak[b] < 0) g_peak[b] = 0;
-    }
-  }
-
-  if (showDebug) {
-    Serial.println();
-  }
+static float compress_level(float v){
+  // v może być >1. Kompresja logarytmiczna -> dużo "życia" przy cichych fragmentach
+  // comp=8 daje sensowną dynamikę na FLAC/AAC
+  const float comp = 8.0f;
+  float y = log1pf(comp * v) / log1pf(comp);
+  return clamp01(y);
 }
 
-// Generator testowy - tworzy przykładowy sygnał audio
-static void generate_test_samples()
-{
-  if (!g_useTestGenerator || !g_q) return;
-  
-  // Generuj kilka próbek z różnymi częstotliwościami
-  for (int i = 0; i < 64; i++) {
-    g_testPhase++;
-    // Symulja mix kilku częstotliwości
-    float f1 = sin(g_testPhase * 0.01f) * 500.0f;      // 100 Hz
-    float f2 = sin(g_testPhase * 0.02f) * 300.0f;      // 400 Hz  
-    float f3 = sin(g_testPhase * 0.05f) * 200.0f;      // 1kHz
-    int16_t sample = (int16_t)(f1 + f2 + f3);
-    xQueueSend(g_q, &sample, 0);
-  }
-  g_sampleCount += 64; // Zaktualizuj licznik dla diagnostyki
-}
+// ======================= TASK ANALIZATORA (Core1) =======================
 
-static void analyzer_task(void*)
-{
-  static int16_t frame[N];
-  uint32_t lastAnalyze = 0;
-  uint32_t lastTestGen = 0;
-  uint32_t taskLoopCount = 0;
+static void analyzer_task(void*){
+  frame_t fr;
+  const TickType_t waitTicks = pdMS_TO_TICKS(25);
 
-  Serial.println("Analyzer task started!");
+  // parametry "fizyki" słupków (style 5/6)
+  const float attack = 0.55f;      // szybko rośnie
+  const float release = 0.08f;     // wolniej opada
+  const float peakFall = 0.012f;   // opadanie peak-hold (wolniejsze)
+  const uint32_t peakHoldMs = analyzerGetPeakHoldTime(); // czas zatrzymania peak na szczycie w ms
 
-  for (;;) {
-    taskLoopCount++;
-    
-    if (!eqAnalyzerEnabled) {
-      if (taskLoopCount % 100 == 0) {
-        Serial.println("Task: analyzer disabled, waiting...");
-      }
-      vTaskDelay(pdMS_TO_TICKS(100));
+  while(true){
+    // gdy OFF lub nieaktywny runtime -> śpimy, nie dotykamy CPU
+    if(!g_enabled || !g_runtimeActive){
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
-    
-    if (!g_q) {
-      Serial.println("Task: g_q is NULL!");
-      vTaskDelay(pdMS_TO_TICKS(100));
+
+    if(xQueueReceive(g_q, &fr, waitTicks) != pdTRUE){
+      // brak ramki – luz
       continue;
     }
-    
-    // Sprawdź czy przez ostatnie 2 sekundy otrzymywaliśmy próbki
-    uint32_t now = millis();
-    if (g_sampleCount == g_lastSampleCount && (now - lastTestGen > 2000)) {
-      g_useTestGenerator = true; // Włącz generator testowy
-      lastTestGen = now;
-    } else if (g_sampleCount != g_lastSampleCount) {
-      g_useTestGenerator = false; // Wyłącz gdy mamy prawdziwe audio
-      g_lastSampleCount = g_sampleCount;
+
+    // 1) policz energię globalną ramki (ref/AGC)
+    float sumAbs = 0.f;
+    for(uint16_t i=0;i<FRAME_N;i++){
+      sumAbs += fabsf((float)fr.s[i]);
     }
-    
-    // Generuj testowe próbki co 50ms jeśli potrzeba
-    if (g_useTestGenerator && (now - lastTestGen > 50)) {
-      generate_test_samples();
-      lastTestGen = now;
+    float refNow = (sumAbs / (float)FRAME_N);
+
+    // AGC: szybciej reaguj na wzrost, wolniej na spadek
+    if(refNow > g_ref) g_ref = g_ref + 0.20f*(refNow - g_ref);
+    else               g_ref = g_ref + 0.05f*(refNow - g_ref);
+
+    if(g_ref < g_ref_min) g_ref = g_ref_min;
+    if(g_ref > g_ref_max) g_ref = g_ref_max;
+
+    // 2) pasma – goertzel
+    float raw[EQ_BANDS];
+    for(uint8_t b=0;b<EQ_BANDS;b++){
+      float p = goertzel_mag(fr.s, FRAME_N, kBandHz[b], (float)g_sr_eff);
+      // normalizacja: p rośnie z N i amplitudą^2, więc bierzemy sqrt-ish przez pow^0.5
+      // zamiast sqrt: powf(p,0.5f) jest wolne -> szybciej sqrtf, bo jest sprzętowo wspierane.
+      float mag = sqrtf(p);
+
+      // przeskaluj względem ref (AGC) i pasma - zwiększona dynamika
+      float v = (mag / (g_ref * 220.0f)) * kBandGain[b]; // 220 - maksymalna dynamika
+      raw[b] = compress_level(v);
     }
 
-    int got = 0;
-    while (got < N) {
-      int16_t s;
-      if (xQueueReceive(g_q, &s, pdMS_TO_TICKS(20)) == pdTRUE) frame[got++] = s;
-      else break;
-    }
+    // 3) wygładzanie + peak hold
+    portENTER_CRITICAL(&g_mux);
+    for(uint8_t b=0;b<EQ_BANDS;b++){
+      float cur = g_levels[b];
+      float target = raw[b];
 
-    if (got == N) {
-      uint32_t now = millis();
-      if (now - lastAnalyze >= ANALYZE_PERIOD_MS) {
-        lastAnalyze = now;
-        analyze_frame(frame);
-        g_lastFrameProcessed = now;  // Zapisz czas przetworzenia ramki
-        
-        // Debug co 5 sekund
-        static uint32_t lastDebug = 0;
-        if (now - lastDebug > 5000) {
-          Serial.print("Analyzer: processed frame, got ");
-          Serial.print(got);
-          Serial.println(" samples");
-          lastDebug = now;
+      // attack/release
+      if(target > cur) cur = cur + attack*(target - cur);
+      else             cur = cur + release*(target - cur);
+
+      cur = clamp01(cur);
+      g_levels[b] = cur;
+
+      // peaks z hold time
+      float pk = g_peaks[b];
+      uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+      
+      if(cur > pk) {
+        // Nowy peak - ustaw wartość i zresetuj timer
+        pk = cur;
+        g_peak_timers[b] = now_ms;
+      } else {
+        // Sprawdź czy peak hold time minął
+        if((now_ms - g_peak_timers[b]) > peakHoldMs) {
+          // Hold time minął - zaczynaj opadanie
+          pk -= peakFall;
+          if(pk < cur) pk = cur; // nie opadaj poniżej aktualnego poziomu
         }
+        // Jeśli hold time jeszcze nie minął, pk zostaje bez zmian
       }
-    } else {
-      // Debug jeśli nie ma wystarczająco próbek
-      static uint32_t noSamplesDebug = 0;
-      if (taskLoopCount % 1000 == 0) {
-        Serial.print("Task: only got ");
-        Serial.print(got);
-        Serial.print(" samples (need ");
-        Serial.print(N);
-        Serial.println(")");
-      }
-      vTaskDelay(pdMS_TO_TICKS(5));
+      
+      if(pk < 0) pk = 0;
+      g_peaks[b] = pk;
     }
+    portEXIT_CRITICAL(&g_mux);
   }
 }
 
-// ==================== HOOK Z AUDIO ====================
-// Jeśli słupki stoją, prawie zawsze biblioteka audio NIE wywołuje tego hooka.
-void audio_process_i2s(int16_t* outBuff, int32_t validSamples, bool* continueI2S)
-{
-  // WAŻNE: continueI2S musi być ustawione na true żeby audio kontynuowało
-  if (continueI2S) *continueI2S = true;
-  
-  // Debug - sprawdź czy hook jest w ogóle wywoływany
-  static uint32_t hookCallCount = 0;
-  hookCallCount++;
-  if (hookCallCount % 1000 == 0) {
-    Serial.print("audio_process_i2s called: ");
-    Serial.print(hookCallCount);
-    Serial.print(" times, validSamples: ");
-    Serial.println(validSamples);
+// ======================= API =======================
+
+bool eq_analyzer_init(void){
+  if(g_q) return true;
+
+  g_q = xQueueCreate(6, sizeof(frame_t)); // mała kolejka = małe opóźnienie
+  if(!g_q) return false;
+
+  BaseType_t ok = xTaskCreatePinnedToCore(
+    analyzer_task,
+    "EQAnalyzer",
+    4096,          // stack
+    nullptr,
+    1,             // niski priorytet
+    &g_task,
+    1              // Core1 (Core0 zostaje dla audio)
+  );
+  if(ok != pdPASS){
+    vQueueDelete(g_q);
+    g_q = nullptr;
+    return false;
   }
-  
-  // Debug - sprawdź stan analizatora
-  if (!eqAnalyzerEnabled) {
-    static uint32_t disabledCount = 0;
-    disabledCount++;
-    if (disabledCount % 5000 == 0) {
-      Serial.println("Analyzer DISABLED - enable it first!");
+
+  eq_analyzer_reset();
+  return true;
+}
+
+void eq_analyzer_deinit(void){
+  if(g_task){
+    vTaskDelete(g_task);
+    g_task = nullptr;
+  }
+  if(g_q){
+    vQueueDelete(g_q);
+    g_q = nullptr;
+  }
+}
+
+void eq_analyzer_reset(void){
+  portENTER_CRITICAL(&g_mux);
+  for(uint8_t i=0;i<EQ_BANDS;i++){
+    g_levels[i]=0;
+    g_peaks[i]=0;
+  }
+  portEXIT_CRITICAL(&g_mux);
+  g_ref = 1200.0f;
+  g_lastPushUs = 0;
+  g_samplesPushed = 0;
+  g_samplesPushedPrev = 0;
+  g_acc_n = 0;
+  g_ds_phase = 0;
+}
+
+void eq_analyzer_set_enabled(bool en){
+  g_enabled = en;
+  if(!en){
+    eq_analyzer_reset();
+    // opróżnij kolejkę
+    if(g_q) xQueueReset(g_q);
+  }
+}
+bool eq_analyzer_get_enabled(void){ return g_enabled; }
+
+void eq_analyzer_set_runtime_active(bool active){
+  g_runtimeActive = active;
+  if(!active){
+    // żeby nie wisiały stare wartości
+    portENTER_CRITICAL(&g_mux);
+    for(uint8_t i=0;i<EQ_BANDS;i++){
+      g_levels[i] *= 0.7f;
+      g_peaks[i]  *= 0.7f;
     }
-    return;
+    portEXIT_CRITICAL(&g_mux);
   }
-  
-  if (!g_q) {
-    Serial.println("Queue g_q is NULL - call eq_analyzer_init() first!");
-    return;
-  }
+}
 
-  // Diagnostyka - zlicz próbki
-  g_sampleCount++;
-  
-  // stereo interleaved: L,R,L,R...
-  int32_t samplesAdded = 0;
-  for (int32_t i = 0; i + 1 < validSamples; i += (int32_t)(2 * DOWNSAMPLE)) {
-    int32_t L = outBuff[i];
-    int32_t R = outBuff[i + 1];
-    int16_t mono = (int16_t)((L + R) / 2);
-    if (xQueueSend(g_q, &mono, 0) == pdTRUE) {
-      samplesAdded++;
+void eq_analyzer_set_sample_rate(uint32_t sample_rate_hz){
+  if(sample_rate_hz < 8000) sample_rate_hz = 8000;
+  g_sr_hz = sample_rate_hz;
+
+  // downsample: dla 44.1/48k -> 2, dla 96k -> 4
+  if(sample_rate_hz >= 88000) g_downsample = 4;
+  else if(sample_rate_hz >= 32000) g_downsample = 2;
+  else g_downsample = 1;
+
+  g_sr_eff = sample_rate_hz / g_downsample;
+}
+
+void eq_analyzer_push_samples_i16(const int16_t* interleavedLR, uint32_t frames){
+  // UWAGA: ta funkcja leci z audio path – zero printów, zero malloc, zero heavy math.
+  if(!g_enabled) return;
+  if(!g_q) return;
+
+  // jeśli nieaktywny runtime – też nie zbieramy (oszczędzamy RAM/CPU)
+  if(!g_runtimeActive && !g_testGen) return;
+
+  // mono = (L+R)/2, downsample
+  for(uint32_t i=0;i<frames;i++){
+    if(g_downsample > 1){
+      if(g_ds_phase++ < (g_downsample-1)) continue;
+      g_ds_phase = 0;
     }
-  }
-  
-  // Debug co 10000 wywołań
-  if (hookCallCount % 10000 == 0) {
-    UBaseType_t queueSpaces = uxQueueSpacesAvailable(g_q);
-    Serial.print("Queue spaces available: ");
-    Serial.print(queueSpaces);
-    Serial.print(", samples added this call: ");
-    Serial.println(samplesAdded);
-  }
-}
 
-void eq_analyzer_init(void)
-{
-  if (!g_q) {
-    g_q = xQueueCreate(4096, sizeof(int16_t));
-    if (!g_q) return;
-    xTaskCreatePinnedToCore(analyzer_task, "analyzer", 8192, nullptr, 1, nullptr, 1);
-  }
-}
-
-void eq_analyzer_reset(void)
-{
-  for (int i=0;i<RUNTIME_EQ_BANDS;i++) { g_level[i]=0; g_peak[i]=0; g_peakHoldUntil[i]=0; }
-  if (g_q) xQueueReset(g_q);
-}
-
-void eq_analyzer_set_enabled(bool enabled)
-{
-  eqAnalyzerEnabled = enabled;
-  if (!enabled) eq_analyzer_reset();
-}
-
-void eq_get_analyzer_levels(float* outLevels)
-{
-  for (int i=0;i<RUNTIME_EQ_BANDS;i++) outLevels[i] = g_level[i];
-}
-
-void eq_get_analyzer_peaks(float* outPeaks)
-{
-  for (int i=0;i<RUNTIME_EQ_BANDS;i++) outPeaks[i] = g_peak[i];
-}
-
-// Funkcja diagnostyczna - sprawdź czy próbki napływają
-bool eq_analyzer_is_receiving_samples()
-{
-  static uint32_t lastDebug = 0;
-  uint32_t now = millis();
-  
-  // Sprawdź czy ramka była przetworzona w ostatnich 3 sekundach
-  bool recentlyProcessed = (now - g_lastFrameProcessed) < 3000;
-  
-  // Alternatywnie sprawdź czy próbki napływają
-  uint32_t current = g_sampleCount;
-  bool samplesIncreasing = (current != g_lastSampleCount);
-  
-  bool receiving = recentlyProcessed || samplesIncreasing;
-  
-  // Debug co 3 sekundy
-  if (now - lastDebug > 3000) {
-    Serial.print("eq_analyzer_is_receiving_samples: recentFrame=");
-    Serial.print(recentlyProcessed ? "YES" : "NO");
-    Serial.print(", samplesInc=");
-    Serial.print(samplesIncreasing ? "YES" : "NO");
-    Serial.print(", result=");
-    Serial.print(receiving ? "YES" : "NO");
+    int32_t L = interleavedLR[i*2 + 0];
+    int32_t R = interleavedLR[i*2 + 1];
     
-    if (g_q) {
-      UBaseType_t count = uxQueueMessagesWaiting(g_q);
-      Serial.print(", queue=");
-      Serial.print(count);
-    }
-    Serial.println();
-    lastDebug = now;
-  }
-  
-  g_lastSampleCount = current;
-  return receiving;
-}
+    // 2% wzmocnienia na wejściu analizatora
+    int32_t mono32 = ((L + R) / 2) * 102 / 100; // 1.02x wzmocnienie
+    
+    // Zabezpieczenie przed przepełnieniem
+    if (mono32 > 32767) mono32 = 32767;
+    else if (mono32 < -32768) mono32 = -32768;
+    
+    int16_t m = (int16_t)mono32;
 
-uint32_t eq_analyzer_get_sample_count()
-{
-  return g_sampleCount;
-}
+    g_acc[g_acc_n++] = m;
+    g_samplesPushed++; // liczymy realnie próbki mono po downsample
 
-void eq_analyzer_enable_test_generator(bool enable)
-{
-  g_useTestGenerator = enable;
-  if (enable) {
-    g_testPhase = 0;
-  }
-}
+    if(g_acc_n >= FRAME_N){
+      frame_t fr;
+      memcpy(fr.s, g_acc, sizeof(g_acc));
+      fr.n = FRAME_N;
+      g_acc_n = 0;
 
-void eq_analyzer_set_sample_rate(uint32_t sampleRate)
-{
-  if (sampleRate >= 8000 && sampleRate <= 192000) {
-    g_audioSampleRate = sampleRate;
-    Serial.printf("[ANALYZER] Sample rate set to: %u Hz (effective: %u Hz)\n", 
-                  g_audioSampleRate, get_effective_sample_rate());
-  } else {
-    Serial.printf("[ANALYZER] Invalid sample rate: %u Hz, keeping: %u Hz\n", 
-                  sampleRate, g_audioSampleRate);
-  }
-}
-
-uint32_t eq_analyzer_get_sample_rate()
-{
-  return g_audioSampleRate;
-}
-
-void eq_analyzer_print_diagnostics()
-{
-  Serial.println("\n=== ANALYZER DIAGNOSTICS ===");
-  Serial.printf("Enabled: %s\n", eqAnalyzerEnabled ? "YES" : "NO");
-  Serial.printf("Sample Rate: %u Hz (effective: %u Hz)\n", g_audioSampleRate, get_effective_sample_rate());
-  Serial.printf("Total Samples Received: %u\n", g_sampleCount);
-  Serial.printf("Test Generator: %s\n", g_useTestGenerator ? "ACTIVE" : "OFF");
-  
-  if (g_q) {
-    UBaseType_t queueCount = uxQueueMessagesWaiting(g_q);
-    Serial.printf("Queue Status: %u/%u samples\n", queueCount, N);
-  } else {
-    Serial.println("Queue Status: NOT INITIALIZED");
-  }
-  
-  Serial.print("Current Levels: ");
-  for (int i = 0; i < RUNTIME_EQ_BANDS; i++) {
-    Serial.printf("%.2f ", g_level[i]);
-    if (i == 7) Serial.print("\n                ");
-  }
-  Serial.println();
-  
-  Serial.print("Band Frequencies: ");
-  for (int i = 0; i < RUNTIME_EQ_BANDS; i++) {
-    Serial.printf("%.0fHz ", kBandHz[i]);
-    if (i == 7) Serial.print("\n                  ");
-  }
-  Serial.println();
-  Serial.println("============================\n");
-}
-
-// Funkcje konfiguracji analizatora
-void eq_set_style5_params(uint8_t segments, uint8_t barWidth, uint8_t barGap)
-{
-  if (segments > 0 && segments <= 40) eq5_maxSegments = segments;
-  if (barWidth > 0 && barWidth <= 20) eq_barWidth5 = barWidth;  
-  if (barGap >= 0 && barGap <= 10) eq_barGap5 = barGap;
-}
-
-void eq_set_style6_params(uint8_t segments, uint8_t barWidth, uint8_t barGap)
-{
-  if (segments > 0 && segments <= 40) eq6_maxSegments = segments;
-  if (barWidth > 0 && barWidth <= 20) eq_barWidth6 = barWidth;
-  if (barGap >= 0 && barGap <= 10) eq_barGap6 = barGap;
-}
-
-// Funkcja automatycznego dopasowania szerokości do całego ekranu
-void eq_auto_fit_width(uint8_t style, uint16_t screenWidth)
-{
-  if (style == 5) {
-    // Oblicz optymalne rozmiary dla trybu 5
-    uint8_t totalGaps = (EQ_BANDS - 1) * eq_barGap5;
-    uint8_t availableWidth = screenWidth - totalGaps - 4; // -4 margin
-    uint8_t optimalBarWidth = availableWidth / EQ_BANDS;
-    if (optimalBarWidth > 0) {
-      eq_barWidth5 = optimalBarWidth;
-    }
-  } else if (style == 6) {
-    // Oblicz optymalne rozmiary dla trybu 6
-    uint8_t totalGaps = (EQ_BANDS - 1) * eq_barGap6;
-    uint8_t availableWidth = screenWidth - totalGaps - 4; // -4 margin
-    uint8_t optimalBarWidth = availableWidth / EQ_BANDS;
-    if (optimalBarWidth > 0) {
-      eq_barWidth6 = optimalBarWidth;
+      // non-blocking send – jak kolejka pełna, wyrzucamy (bez wpływu na audio)
+      xQueueSend(g_q, &fr, 0);
+      g_lastPushUs = (uint64_t)esp_timer_get_time();
     }
   }
+}
+
+void eq_get_analyzer_levels(float out_levels[EQ_BANDS]){
+  portENTER_CRITICAL(&g_mux);
+  memcpy(out_levels, g_levels, sizeof(float)*EQ_BANDS);
+  portEXIT_CRITICAL(&g_mux);
+}
+
+void eq_get_analyzer_peaks(float out_peaks[EQ_BANDS]){
+  portENTER_CRITICAL(&g_mux);
+  memcpy(out_peaks, g_peaks, sizeof(float)*EQ_BANDS);
+  portEXIT_CRITICAL(&g_mux);
+}
+
+bool eq_analyzer_is_receiving_samples(void){
+  // czy w ostatniej 1.2s były próbki
+  uint64_t now = (uint64_t)esp_timer_get_time();
+  bool recent = (g_lastPushUs != 0) && ((now - g_lastPushUs) < 1200000ULL);
+
+  // czy sample count rośnie
+  uint32_t cur = g_samplesPushed;
+  bool inc = (cur != g_samplesPushedPrev);
+  g_samplesPushedPrev = cur;
+
+  // wynik: recent OR inc (bo przy ciszy ramki mogą się rzadziej składać)
+  return recent || inc;
+}
+
+void eq_analyzer_print_diagnostics(void){
+  Serial.printf("EQ Analyzer: en=%d runtime=%d sr=%u eff=%u ds=%u ref=%.1f q=%u acc=%u samples=%u\n",
+    (int)g_enabled, (int)g_runtimeActive, (unsigned)g_sr_hz, (unsigned)g_sr_eff, (unsigned)g_downsample,
+    g_ref,
+    g_q ? (unsigned)uxQueueMessagesWaiting(g_q) : 0,
+    (unsigned)g_acc_n,
+    (unsigned)g_samplesPushed
+  );
+}
+
+void eq_analyzer_enable_test_generator(bool en){
+  g_testGen = en;
+  // generator prosty: nie implementuję tu, bo to by dodało kod w audio path.
+  // Jeśli chcesz – dopiszemy wersję generującą ramki w analyzer_task (bez audio hook).
 }

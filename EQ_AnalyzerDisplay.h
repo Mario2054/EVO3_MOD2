@@ -27,11 +27,13 @@ struct AnalyzerStyleCfg {
   // ---- Globalne ustawienia ----
   uint8_t availableStylesMode = ANALYZER_STYLES_0_4_5_6; // Które style są dostępne
   uint8_t currentPreset = PRESET_CLASSIC;                // Aktualny preset
+  uint16_t peakHoldTimeMs = 200;                         // Czas zatrzymania peak na szczycie (ms) 50-2000
   
   // ---- Styl 5 - Słupkowy ----
   uint8_t s5_barWidth = 10;     // szerokość słupka (px) 4-16
   uint8_t s5_barGap   = 6;      // przerwa między słupkami (px) 1-8
   uint8_t s5_segments = 32;     // ilość segmentów w pionie 16-64
+  uint8_t s5_segHeight = 2;     // wysokość segmentu (px) 1-4
   float   s5_fill     = 0.60f;  // wypełnienie segmentu (0.1..1.0)
   uint8_t s5_peakHeight = 2;    // wysokość peak hold (px) 1-4
   uint8_t s5_peakGap = 1;       // odstęp peak od słupka (px) 0-3
@@ -39,6 +41,7 @@ struct AnalyzerStyleCfg {
   uint8_t s5_smoothness = 50;   // wygładzanie 10-90 (10=szybkie, 90=wolne)
 
   // ---- Styl 6 - Segmentowy ----
+  uint8_t s6_width  = 10;       // szerokość słupka (px) 4-20
   uint8_t s6_gap    = 1;        // przerwa między kolumnami (px) 0-4
   uint8_t s6_shrink = 1;        // ile px odjąć z szerokości 0-3
   float   s6_fill   = 0.60f;    // wypełnienie segmentu (0.1..1.0)
@@ -97,6 +100,7 @@ void analyzerSetStyleMode(uint8_t styleMode);
 uint8_t analyzerGetAvailableStylesMode();
 uint8_t analyzerGetMaxDisplayMode();
 bool analyzerIsStyleAvailable(uint8_t style);
+uint32_t analyzerGetPeakHoldTime();
 
 // Presety do szybkiego wyboru
 void analyzerPresetClassic();    // Preset 0: Klasyczny

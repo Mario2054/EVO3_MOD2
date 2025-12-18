@@ -32,6 +32,7 @@
 #include <ESPmDNS.h>           // Blibioteka mDNS dla ESP
 #include "EQ_AnalyzerDisplay.h"  // FFT analyzer (styles 5/6)
 #include "EQ_FFTAnalyzer.h"    // FFT analyzer functions
+#include "EQ16_GraphicEQ.h"     // 16-Band Graphic Equalizer
 
 
 #include "soc/rtc_cntl_reg.h"   // Biblioteki ESP aby móc zrobic pełny reset 
@@ -267,6 +268,15 @@ int8_t toneHiValue = 0;                // Wartość filtra dla tonow wysokich
 uint8_t toneSelect = 1;                // Zmienna okreslająca, który filtr equalizera regulujemy, startujemy od pierwszego
 bool equalizerMenuEnable = false;      // Flaga wyswietlania menu Equalizera
 
+// ---- Zmienne dla przełączania EQ 3↔16 przez 3x "0" ---- //
+uint8_t key0ClickCount = 0;            // Licznik naciśnięć przycisku "0"
+unsigned long lastKey0Press = 0;       // Czas ostatniego naciśnięcia "0"
+const unsigned long KEY0_TIMEOUT = 2000; // Timeout w ms (2 sekundy)
+
+// ---- Zmienne dla przełączania EQ przez 2x Green ---- //
+uint8_t greenClickCount = 0;           // Licznik naciśnięć Green
+unsigned long lastGreenPress = 0;      // Czas ostatniego naciśnięcia Green
+const unsigned long GREEN_TIMEOUT = 1500; // Timeout w ms (1.5 sekundy)
 
 uint8_t rcInputDigit1 = 0xFF;      // Pierwsza cyfra w przy wprowadzaniu numeru stacji z pilota
 uint8_t rcInputDigit2 = 0xFF;      // Druga cyfra w przy wprowadzaniu numeru stacji z pilota
@@ -285,6 +295,9 @@ bool f_saveVolumeStationAlways = false;   // Flaga określająca czy zapisujemy 
 //const int maxVisibleLines = 5;  // Maksymalna liczba widocznych linii na ekranie OLED
 bool encoderButton2 = false;      // Flaga określająca, czy przycisk enkodera 2 został wciśnięty
 bool encoderFunctionOrder = true; // Flaga okreslająca kolejność funkcji enkodera 2
+bool eq16MenuActive = false;      // Flaga czy menu EQ16 jest aktywne
+bool eq16BandMode = true;         // true = wybór pasma, false = zmiana gain
+bool useEQ16 = false;             // true = użyj EQ16, false = użyj 3-punktowy equalizer
 bool displayActive = false;       // Flaga określająca, czy wyświetlacz jest aktywny
 
 bool mp3 = false;                 // Flaga określająca, czy aktualny plik audio jest w formacie MP3
@@ -346,9 +359,14 @@ const int vuYmode3 = 62;                   // Polozenie wyokosci (Y) VU w trybie
 bool vuPeakHoldOn = 1;                     // Flaga okreslajaca czy funkcja Peak & Hold na wskazniku VUmeter jest wlaczona
 bool vuMeterOn = true;                     // Flaga właczajaca wskazniki VU
 bool eqAnalyzerOn = true;                // FFT analyzer on/off for styles 5 & 6 (from Web UI) - DOMYŚLNIE WŁĄCZONY
-const uint8_t EQ_BANDS = 16;               // Number of EQ bands for analyzer display
 uint8_t eqLevel[EQ_BANDS] = {0};           // Current bar height 0-100
 uint8_t eqPeak[EQ_BANDS] = {0};            // Peak position for each bar
+
+// ============================================================================
+// 16-BAND GRAPHIC EQUALIZER
+// ============================================================================
+
+// Stare definicje EQ16 zostały przeniesione do EQ16_GraphicEQ.h
 bool vuMeterMode = false;                  // tryb rysowania vuMeter
 uint8_t displayVuL = 0;                    // wartosc VU do wyswietlenia po procesie smooth
 uint8_t displayVuR = 0;                    // wartosc VU do wyswietlenia po procesie smooth
@@ -921,6 +939,17 @@ const char config_html[] PROGMEM = R"rawliteral(
   <tr><td>FFT / Analyzer for Styles 5-9, default:On</td><td><input type="checkbox" name="eqAnalyzerOn" value="1" %S24_checked></td></tr>
   <tr><td>Available Analyzer Styles: 0=0-4-5, 1=0-4-6, 2=All(0-4-5-6-7-8-9)</td><td><input type="number" name="analyzerStylesMode" min="0" max="2" value="%ANALYZER_STYLES"></td></tr>
   <tr><td>Analyzer Preset: 0=Classic, 1=Modern, 2=Compact, 3=Retro, 4=Custom</td><td><input type="number" name="analyzerCurrentPreset" min="0" max="4" value="%ANALYZER_PRESET"></td></tr>
+
+  <tr><th><b>16-Band Graphic Equalizer</b></th></tr>
+  <tr><td>Enable 16-Band Graphic Equalizer, default:Off</td><td><input type="checkbox" name="eq16Enabled" value="1" %EQ16_ENABLED_checked></td></tr>
+  <tr><td>EQ16 Actions</td><td>
+    <button type="button" class="button" onclick="location.href='/eq16reset'">Reset All Bands</button>
+    <button type="button" class="button" onclick="location.href='/eq16preset/0'">Flat</button>
+    <button type="button" class="button" onclick="location.href='/eq16preset/1'">Bass</button>
+    <button type="button" class="button" onclick="location.href='/eq16preset/2'">Vocal</button>
+    <button type="button" class="button" onclick="location.href='/eq16preset/3'">Presence</button>
+    <button type="button" class="button" onclick="location.href='/eq16preset/4'">V-Shape</button>
+  </td></tr>
   </table>
   <input type="submit" value="Update">
   </form>
@@ -3171,6 +3200,96 @@ void displayRadio()
 
 
 // Obsługa callbacka info o audio dla bibliteki 3.4.1 i nowszej.
+// Audio processing callback - called before i2s_write with PCM samples
+// Function to apply current equalizer settings
+void applyEqualizerSettings() {
+  if (useEQ16 && EQ16_isEnabled()) {
+    // Use 16-band EQ16 system - disable 3-point EQ
+    audio.setTone(0, 0, 0);  // Reset 3-point EQ to neutral
+    Serial.println("DEBUG: Applied EQ16 settings - 3-point EQ disabled, 16-band processing enabled");
+  } else {
+    // Use 3-point equalizer system
+    audio.setTone(toneLowValue, toneMidValue, toneHiValue);
+    Serial.printf("DEBUG: Applied 3-point EQ - Low:%d Mid:%d High:%d - 16-band processing disabled\n", toneLowValue, toneMidValue, toneHiValue);
+  }
+}
+
+// Function to switch between EQ systems
+void switchEqualizerSystem() {
+  // Close any active menus
+  if (eq16MenuActive) {
+    EQ16_setMenuActive(false);
+    eq16MenuActive = false;
+  }
+  if (equalizerMenuEnable) {
+    equalizerMenuEnable = false;
+  }
+  
+  // Switch system
+  useEQ16 = !useEQ16;
+  
+  // Apply new settings
+  applyEqualizerSettings();
+  
+  Serial.printf("DEBUG: Switched to %s equalizer system\n", useEQ16 ? "EQ16 (16-band)" : "3-point");
+  
+  // Show brief message on display
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB10_tr);
+  u8g2.drawStr(10, 25, useEQ16 ? "EQ16 SYSTEM" : "3-POINT EQ");
+  u8g2.drawStr(10, 45, "ACTIVATED");
+  u8g2.sendBuffer();
+  delay(1500);
+  displayRadio();  // Return to main display
+}
+
+void audio_process_i2s(int16_t* outBuff, int32_t validSamples, bool* continueI2S)
+{
+  // Push audio samples to EQ analyzer (validSamples is number of stereo frames)
+  eq_analyzer_push_samples_i16((const int16_t*)outBuff, validSamples);
+  
+  // Process audio through 16-band graphic equalizer
+  if (useEQ16 && EQ16_isEnabled()) {
+    // outBuff format: [L0,R0,L1,R1,L2,R2...] (interleaved stereo)
+    // validSamples = number of stereo frames (pairs)
+    
+    for (int32_t i = 0; i < validSamples; i++) {
+      // Convert to float
+      float leftFloat = (float)outBuff[i * 2] / 32768.0f;      // L channel
+      float rightFloat = (float)outBuff[i * 2 + 1] / 32768.0f; // R channel
+      
+      // Process through EQ16 - apply filters to each channel
+      leftFloat = EQ16_processSample(leftFloat, rightFloat, true);   // Left channel
+      rightFloat = EQ16_processSample(rightFloat, leftFloat, false); // Right channel
+      
+      // Apply 100x attenuation to prevent clipping from EQ16 gain  
+      const float EQ16_ATTENUATION = 0.01f;  // 1/100 = 0.01 (100x reduction)
+      leftFloat *= EQ16_ATTENUATION;
+      rightFloat *= EQ16_ATTENUATION;
+      
+      // Prevent clipping (should be rare now with attenuation)
+      if (leftFloat > 1.0f) leftFloat = 1.0f;
+      if (leftFloat < -1.0f) leftFloat = -1.0f;
+      if (rightFloat > 1.0f) rightFloat = 1.0f;
+      if (rightFloat < -1.0f) rightFloat = -1.0f;
+      
+      // Convert back to int16
+      outBuff[i * 2] = (int16_t)(leftFloat * 32767.0f);      // L channel  
+      outBuff[i * 2 + 1] = (int16_t)(rightFloat * 32767.0f); // R channel
+    }
+    // Debug log every 10000 samples (~every 5 seconds at 48kHz)
+    static int debugCounter = 0;
+    debugCounter += validSamples;
+    if (debugCounter > 10000) {
+      Serial.println("DEBUG: EQ16 audio processing active");
+      debugCounter = 0;
+    }
+  }
+  
+  // Continue normal audio processing
+  *continueI2S = true;
+}
+
 void my_audio_info(Audio::msg_t m)
 {
   switch(m.e)
@@ -3512,8 +3631,26 @@ void handleButtons()
 
       // Jeśli przycisk jest wciśnięty przez co najmniej 3 sekundy i akcja jeszcze nie była wykonana
       if (millis() - buttonPressTime2 >= buttonLongPressTime2 && !action2Taken && millis() - buttonPressTime2 < buttonSuperLongPressTime2) {
-        Serial.println("debug--Bank Menu");
-        bankMenuDisplay();
+        // Przełączanie między Bank Menu a EQ16 Menu - tylko jeśli EQ16 jest włączone
+        Serial.printf("DEBUG: Long press detected, EQ16_isEnabled()=%s\n", EQ16_isEnabled() ? "true" : "false");
+        if (EQ16_isEnabled()) {
+          if (!eq16MenuActive) {
+            Serial.println("debug--EQ16 Menu Activated");
+            eq16MenuActive = true;
+            eq16BandMode = true;  // Zaczynamy od wyboru pasma
+            EQ16_setMenuActive(true);
+            EQ16_displayMenu();
+          } else {
+            Serial.println("debug--EQ16 Menu Deactivated, switching to Bank Menu");
+            eq16MenuActive = false;
+            EQ16_setMenuActive(false);
+            bankMenuDisplay();
+          }
+        } else {
+          // EQ16 jest wyłączone - pokaż komunikat lub przejdź do zwykłego menu
+          Serial.println("debug--EQ16 jest wyłączone w ustawieniach");
+          bankMenuDisplay();
+        }
         
         // Ustawiamy flagę akcji, aby wykonała się tylko raz
         action2Taken = true;
@@ -4409,6 +4546,10 @@ void saveEqualizerOnSD()
       Serial.println("debug SD -> Błąd podczas tworzenia pliku equalizer.txt.");
     }
   }
+  
+  // Pokazujemy komunikat przez sekundę, potem wracamy do głównego ekranu
+  delay(1000);
+  displayRadio();
 }
 
 void readEqualizerFromSD() 
@@ -5516,6 +5657,15 @@ void clearFlags()
   f_voiceTimeBlocked = false;
   if (f_displaySleepTime && f_sleepTimerOn) {f_displaySleepTimeSet = true;}
   f_displaySleepTime = false;
+  
+  // Wyłącz menu EQ16 tylko gdy nie jest aktywnie używane
+  // UWAGA: Nie wyłączaj menu EQ16 automatycznie - użytkownik musi to zrobić ręcznie
+  /*
+  if (eq16MenuActive) {
+    eq16MenuActive = false;
+    EQ16_setMenuActive(false);
+  }
+  */
 
   rcInputDigit1 = 0xFF; // czyscimy cyfre 1, flaga pustej zmiennej to FF
   rcInputDigit2 = 0xFF; // czyscimy cyfre 2, flaga pustej zmiennej to FF
@@ -5910,6 +6060,11 @@ void displayEqualizer() // Funkcja rysująca menu 3-punktowego equalizera
   u8g2.sendBuffer(); 
 }
 
+// ============================================================================
+// 16-BAND GRAPHIC EQUALIZER FUNCTIONS
+// ============================================================================
+
+// Stara implementacja EQ16 została przeniesiona do EQ16_GraphicEQ.cpp
 
 void displayBasicInfo()
 {
@@ -6321,8 +6476,10 @@ void handleEncoder2StationsVolumeClick()
     listedStations = false;
     volumeSet = false;
     changeStation();
-    displayRadio();
-    u8g2.sendBuffer();
+    if (!EQ16_isMenuActive()) {
+      displayRadio();
+      u8g2.sendBuffer();
+    }
     clearFlags();
   }
 
@@ -6345,7 +6502,9 @@ void handleEncoder2StationsVolumeClick()
     fetchStationsFromServer();
     changeStation();
     u8g2.clearBuffer();
-    displayRadio();
+    if (!EQ16_isMenuActive()) {
+      displayRadio();
+    }
 
     volumeSet = false;
     bankMenuEnable = false;
@@ -6453,7 +6612,9 @@ void handleEncoder2VolumeStationsClick()
     {
       audio.setVolume(volumeValue);   
     }
-    displayRadio();
+    if (!EQ16_isMenuActive()) {
+      displayRadio();
+    }
     return;
   }
   #endif
@@ -7990,6 +8151,55 @@ bool loadXBM(const char* filename)
   return true;
 }
 
+// ============================================================================
+// OBSŁUGA ENKODERA DLA MENU EQ16
+// ============================================================================
+void handleEQ16Encoder()
+{
+  CLK_state2 = digitalRead(CLK_PIN2);
+  if (CLK_state2 != prev_CLK_state2 && CLK_state2 == HIGH)
+  {
+    timeDisplay = false;
+    displayActive = true;
+    displayStartTime = millis();  // Reset timeout for EQ16
+    
+    Serial.printf("DEBUG EQ16: Encoder turned, mode=%s\n", eq16BandMode ? "band selection" : "gain adjustment");
+    
+    if (eq16BandMode) {
+      // Tryb wyboru pasma
+      if (digitalRead(DT_PIN2) == HIGH) {
+        Serial.println("DEBUG EQ16: selectPrevBand()");
+        EQ16_selectPrevBand();
+      } else {
+        Serial.println("DEBUG EQ16: selectNextBand()");
+        EQ16_selectNextBand();
+      }
+    } else {
+      // Tryb zmiany gain
+      if (digitalRead(DT_PIN2) == HIGH) {
+        Serial.println("DEBUG EQ16: decreaseBandGain()");
+        EQ16_decreaseBandGain();
+      } else {
+        Serial.println("DEBUG EQ16: increaseBandGain()");
+        EQ16_increaseBandGain();
+      }
+    }
+    
+    // Odśwież wyświetlacz
+    EQ16_displayMenu();
+  }
+  
+  prev_CLK_state2 = CLK_state2;
+  
+  // Obsługa przycisku - przełączanie trybu band/gain
+  if (button2.isPressed()) {
+    Serial.printf("DEBUG EQ16: Button pressed, switching from %s to ", eq16BandMode ? "band selection" : "gain adjustment");
+    eq16BandMode = !eq16BandMode;
+    Serial.printf("%s mode\n", eq16BandMode ? "band selection" : "gain adjustment");
+    EQ16_displayMenu();  // Odśwież wyświetlacz
+  }
+}
+
 void startOta()
 {
   timeDisplay = false;
@@ -8021,6 +8231,11 @@ void setup()
 
   // Inicjalizuj komunikację szeregową (Serial)
   Serial.begin(115200);
+  
+  // Resetowanie sleep timer na początku - upewniamy się że jest wyłączony
+  f_sleepTimerOn = false;
+  sleepTimerValueSet = 0;
+  sleepTimerValueCounter = 0;
     
   uint64_t chipid = ESP.getEfuseMac();
   Serial.println("");
@@ -8034,6 +8249,9 @@ void setup()
   
   Audio::audio_info_callback = my_audio_info; // Przypisanie własnej funkcji callback do obsługi zdarzeń i informacji audio
   audio.setVolume(0);
+  
+  // Optymalizacja prędkości połączeń audio
+  audio.setConnectionTimeout(8, 10); // connection timeout 8s, data timeout 10s (domyślnie 20s, 30s)
 
   // Inicjalizacja SPI z nowymi pinami dla czytnika kart SD
   customSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);  // SCLK = 45, MISO = 21, MOSI = 48, CS = 47
@@ -8107,9 +8325,9 @@ void setup()
   SPI.setFrequency(2000000);
 
 
-  // Inicjalizuj wyświetlacz i odczekaj 250 milisekund na włączenie
+  // Inicjalizuj wyświetlacz i odczekaj na włączenie
   u8g2.begin();
-  delay(250);
+  delay(10); // Minimalny delay dla stabilizacji wyświetlacza
   
   // ----------------- KARTA SD / PAMIEC SPIFFS - Inicjalizacja -----------------
   if (!STORAGE_BEGIN())
@@ -8128,6 +8346,7 @@ void setup()
   // Wczytaj osobny config wyglądu analizatora (/analyzer)
   analyzerStyleLoad();
   eq_analyzer_init();
+  eq_analyzer_set_enabled(eqAnalyzerOn);   // Set initial state from config
 if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku config.txt to go tworzymy
   
 
@@ -8143,7 +8362,7 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     {
       u8g2.drawXBMP(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, logo_bits); // obrazek - logo z pamieci
       u8g2.sendBuffer();
-      delay(1000);
+      delay(200); // Jeszcze szybsze uruchamianie
     }   
     u8g2.setFont(u8g2_font_fub14_tf);
     //u8g2.clearBuffer();
@@ -8191,11 +8410,24 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
   
 
     
-  // Inicjalizacja WiFiManagera
+  // Inicjalizacja WiFiManagera - optymalizacja prędkości
   wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setConnectTimeout(8); // Max 8s na połączenie (szybsze)
+  wifiManager.setConfigPortalTimeout(30); // Portal config 30s (szybsze)
+  wifiManager.setScanDispPerc(false); // Wyłącz wyświetlanie procentów
+  wifiManager.setMinimumSignalQuality(10); // Niższy próg jakości sygnału
+  wifiManager.setConnectRetries(2); // Tylko 2 próby połączenia
+  wifiManager.setWiFiAutoReconnect(true); // Auto reconnect
+  wifiManager.setCleanConnect(true); // Szybsze przełączanie
+  wifiManager.setSaveConfigCallback([](){Serial.println("WiFi config saved");});
 
   readStationFromSD();       // Odczytujemy zapisaną ostanią stację i bank z karty SD /EEPROMu
   readEqualizerFromSD();     // Odczytujemy ustawienia filtrów equalizera z karty SD 
+  
+  // Initialize equalizer system - default to EQ16
+  useEQ16 = true;            // Start with 16-band EQ16 equalizer
+  applyEqualizerSettings();  // Apply current equalizer settings
+  
   readVolumeFromSD();        // Odczytujemy nastawę ostatniego poziomu głośnosci z karty SD /EEPROMu
   readAdcConfig();           // Odczyt konfiguracji klawitury ADC
   readRemoteControlConfig(); // Odczyt konfiguracji pilota IR
@@ -8230,7 +8462,7 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     u8g2.drawStr(5, 62, "Connected, IP:");  //wyswietlenie IP
     u8g2.drawStr(90, 62, currentIP.c_str());   //wyswietlenie IP
     u8g2.sendBuffer();
-    delay(1000);  // odczekaj 1 sek przed wymazaniem numeru IP
+    delay(150);  // Jeszcze bardziej skrócone opóźnienie
     
     if (MDNS.begin(hostname)) { Serial.println("mDNS wystartowal, adres: " + String(hostname) + ".local w przeglądarce"); MDNS.addService("http", "tcp", 80);}
         
@@ -8239,10 +8471,10 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     struct tm timeinfo;
     int retry = 0;
     Serial.println("debug RTC -> synchronizacja NTP pierwszy raz od startu");
-    while (!getLocalTime(&timeinfo) && retry < 10) 
+    while (!getLocalTime(&timeinfo) && retry < 3) // Zmniejszony retry z 5 na 3 
     {
       Serial.println("debug RTC -> Czekam na synchronizację czasu NTP...");
-      delay(1000);
+      delay(300); // Zmniejszone opóźnienie z 500ms na 300ms
       retry++;
     }
 
@@ -8653,6 +8885,7 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
         html.replace(F("%S7_checked"), adcKeyboardEnabled ? " checked" : "");
         html.replace(F("%S9_checked"), displayPowerSaveEnabled ? " checked" : "");
         html.replace(F("%S24_checked"), eqAnalyzerOn ? " checked" : "");
+        html.replace(F("%EQ16_ENABLED_checked"), EQ16_isEnabled() ? " checked" : "");
               
 
         request->send(200, "text/html", html);
@@ -8778,6 +9011,13 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
       eqAnalyzerOn               = request->hasParam("eqAnalyzerOn", true);
       eqAnalyzerSetFromWeb(eqAnalyzerOn);
       
+      // EQ16 Graphic Equalizer
+      bool eq16Enabled = request->hasParam("eq16Enabled", true);
+      Serial.printf("DEBUG: Web EQ16 setting: eq16Enabled=%s\n", eq16Enabled ? "true" : "false");
+      EQ16_enable(eq16Enabled);
+      EQ16_saveToSD();  // Zapisz ustawienia EQ16 natychmiast
+      Serial.println("DEBUG: EQ16 web settings saved");
+      
       // Nowe parametry analizatora
       if (request->hasParam("analyzerStylesMode", true)) {
         analyzerStylesMode = request->getParam("analyzerStylesMode", true)->value().toInt();
@@ -8805,6 +9045,19 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
       clearFlags();
       //request->send(200, "text/html","<h1>Config Updated!</h1><a href='/menu'>Go Back</a>");
       request->send(200, "text/html","<!DOCTYPE html><html><head><meta http-equiv='refresh' content='2;url=/'></head><body><h1>Config Updated!</h1></body></html>");
+    });
+    
+    // EQ16 Endpoints
+    server.on("/eq16reset", HTTP_GET, [](AsyncWebServerRequest *request) {
+      EQ16_resetAllBands();
+      request->send(200, "text/html","<!DOCTYPE html><html><head><meta http-equiv='refresh' content='2;url=/'></head><body><h1>EQ16 All Bands Reset!</h1></body></html>");
+    });
+    
+    server.on("^/eq16preset/(\\d+)$", HTTP_GET, [](AsyncWebServerRequest *request) {
+      String presetStr = request->pathArg(0);
+      uint8_t presetId = presetStr.toInt();
+      EQ16_loadPreset(presetId);
+      request->send(200, "text/html","<!DOCTYPE html><html><head><meta http-equiv='refresh' content='2;url=/'></head><body><h1>EQ16 Preset " + presetStr + " Loaded!</h1></body></html>");
     });
     
     server.on("/toggleAdcDebug", HTTP_POST, [](AsyncWebServerRequest *request) 
@@ -9070,10 +9323,12 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
   c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
   c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
+  c.s5_segHeight = (uint8_t)getInt("s5segH", c.s5_segHeight);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
   c.s5_showPeaks = getBool("s5peaks");
 
   // Styl 6
+  c.s6_width    = (uint8_t)getInt("s6w", c.s6_width);
   c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
   c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
   c.s6_fill     = getFloat("s6fill", c.s6_fill);
@@ -9102,6 +9357,9 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s9_filled = getBool("s9filled");
   c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
   c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
+
+  // Globalne ustawienia
+  c.peakHoldTimeMs = (uint16_t)getInt("peakHoldMs", c.peakHoldTimeMs);
 
   analyzerSetStyle(c);
   analyzerStyleSave();
@@ -9129,10 +9387,12 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s5_barWidth = (uint8_t)getInt("s5w", c.s5_barWidth);
   c.s5_barGap   = (uint8_t)getInt("s5g", c.s5_barGap);
   c.s5_segments = (uint8_t)getInt("s5seg", c.s5_segments);
+  c.s5_segHeight = (uint8_t)getInt("s5segH", c.s5_segHeight);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
   c.s5_showPeaks = getBool("s5peaks");
 
   // Styl 6
+  c.s6_width    = (uint8_t)getInt("s6w", c.s6_width);
   c.s6_gap      = (uint8_t)getInt("s6g", c.s6_gap);
   c.s6_shrink   = (uint8_t)getInt("s6sh", c.s6_shrink);
   c.s6_fill     = getFloat("s6fill", c.s6_fill);
@@ -9161,6 +9421,9 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s9_filled = getBool("s9filled");
   c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
   c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
+  
+  // Globalne ustawienia
+  c.peakHoldTimeMs = (uint16_t)getInt("peakHoldMs", c.peakHoldTimeMs);
 
   analyzerSetStyle(c);
   request->send(200, "text/plain", "OK");
@@ -9304,6 +9567,12 @@ server.begin();
     
     } // Nieskonczona petla z procesowaniem Wifi aby nie przejsc do ekranu radia gdy nie ma Wifi
   }
+  
+  // ----------------- EQ16 GRAPHIC EQUALIZER - Inicjalizacja -----------------
+  EQ16_init();
+  EQ16_loadFromSD();  // Ładuj ustawienia z SD karty
+  EQ16_enable(true);  // Wymusimy włączenie na starcie
+  Serial.println("EQ16: 16-Band Graphic Equalizer OK");
 }
 // #######################################################################################  LOOP  ####################################################################################### //
 void loop() 
@@ -9326,6 +9595,13 @@ void loop()
   /*---------------------  FUNKCJA DIMMER ---------------------*/
   if ((displayActive == true) && (displayDimmerActive == true) && (fwupd == false)) {displayDimmer(0);}  
 
+  /*---------------------  FUNKCJA EQ16 AUTO-SAVE ---------------------*/
+  static unsigned long lastEQ16AutoSaveTime = 0;
+  if (millis() - lastEQ16AutoSaveTime > 1000) { // Sprawdzaj tylko co sekundę
+    EQ16_autoSave();  // Automatyczny zapis ustawień EQ16
+    lastEQ16AutoSaveTime = millis();
+  }
+
   // Obsługa enkodera 1 - ocpojanlnego
   #ifdef twoEncoders
     button1.loop();
@@ -9333,8 +9609,13 @@ void loop()
   #endif
   
   // Obsługa enkodera 2
-  if (encoderFunctionOrder == 0) { handleEncoder2VolumeStationsClick(); } 
-  else if (encoderFunctionOrder == 1) { handleEncoder2StationsVolumeClick(); }
+  if (eq16MenuActive) {
+    handleEQ16Encoder();
+  } else if (encoderFunctionOrder == 0) { 
+    handleEncoder2VolumeStationsClick(); 
+  } else if (encoderFunctionOrder == 1) { 
+    handleEncoder2StationsVolumeClick(); 
+  }
   
   // Obsługa przycisku Power ON/OFF
   #ifdef SW_POWER
@@ -9342,15 +9623,25 @@ void loop()
   #endif
 
  /*---------------------  FUNKCJA BACK / POWROTU ze wszystkich opcji Menu, Ustawien, itd ---------------------*/
-  if ((fwupd == false) && (displayActive) && (millis() - displayStartTime >= displayTimeout))  // Przywracanie poprzedniej zawartości ekranu po 6 sekundach
+  // Nie aktywuj timeout gdy EQ16 menu jest aktywne
+  if ((fwupd == false) && (displayActive) && (millis() - displayStartTime >= displayTimeout) && (!EQ16_isMenuActive()))  // Przywracanie poprzedniej zawartości ekranu po 6 sekundach
   {
     if (volumeBufferValue != volumeValue && f_saveVolumeStationAlways) { saveVolumeOnSD(); }    
     if ((rcInputDigitsMenuEnable == true) && (station_nr != stationFromBuffer)) { changeStation(); }  // Jezeli nastapiła zmiana numeru stacji to wczytujemy nową stacje
     
     displayDimmer(0); 
     clearFlags();
-    displayRadio();
-    u8g2.sendBuffer();
+    
+    // Nie nadpisuj EQ16 menu
+    if (!EQ16_isMenuActive()) {
+      Serial.printf("DEBUG: Calling displayRadio() - EQ16 not active (eq16MenuActive=%s)\n", 
+                    eq16MenuActive ? "true" : "false");
+      displayRadio();
+      u8g2.sendBuffer();
+    } else {
+      Serial.printf("DEBUG: Skipping displayRadio() - EQ16 menu is active (eq16MenuActive=%s)\n", 
+                    eq16MenuActive ? "true" : "false");
+    }
     currentSelection = station_nr - 1; // Przywracamy zaznaczenie obecnie grajacej stacji
   }
 
@@ -9361,6 +9652,7 @@ void loop()
     {
       
       detachInterrupt(recv_pin);            // Rozpinamy przerwanie
+      Serial.printf("DEBUG IR: Received code=0x%08X\n", ir_code);
       Serial.print("debug IR -> Kod NEC OK:");
       Serial.print(ir_code, HEX);
       ir_code = reverse_bits(ir_code,32);   // Rotacja bitów - zmiana porządku z LSB-MSB na MSB-LSB
@@ -9375,6 +9667,8 @@ void loop()
       Serial.print(" CMD:");
       Serial.println(CMD, HEX);
       ir_code = ADDR << 8 | CMD;      // Łączymy ADDR i CMD w jedną zmienną 0x ADR CMD
+      
+      Serial.printf("DEBUG IR: Final ir_code=0x%04X (checking against rcCmdAud=0x%04X)\n", ir_code, rcCmdAud);
 
       // Info o przebiegach czasowytch kodu pilota IR
       Serial.print("debug IR -> puls 9ms:"); 
@@ -9405,6 +9699,13 @@ void loop()
           }
         bankMenuDisplay();
         }
+        else if (eq16MenuActive == true)  // 16-BAND EQ NAVIGATION
+        {
+          Serial.println("DEBUG EQ16: Arrow RIGHT - selecting next band");
+          Serial.println("DEBUG EQ16: Calling EQ16_selectNextBand()");
+          EQ16_selectNextBand();
+          EQ16_displayMenu(); // Odśwież wyświetlacz
+        }
         else if (equalizerMenuEnable == true)
         {
           if (toneSelect == 1) {toneHiValue++;}
@@ -9414,6 +9715,8 @@ void loop()
           if (toneHiValue > 6) {toneHiValue = 6;}
           if (toneMidValue > 6) {toneMidValue = 6;}
           if (toneLowValue > 6) {toneLowValue = 6;}
+          
+          if (!useEQ16) applyEqualizerSettings();  // Apply 3-point EQ changes
           displayEqualizer();
         }     
         else if (listedStations == true) // Szybkie przewijanie o 5 stacji
@@ -9436,8 +9739,10 @@ void loop()
           //if (station_nr > stationsCount) { station_nr = stationsCount; }
           if (station_nr > stationsCount) { station_nr = 1; } // Przwijanie listy stacji w pętli po osiągnieciu ostatniej stacji banku przewijamy do pierwszej.
           changeStation();
-          displayRadio();
-          u8g2.sendBuffer();
+          if (!EQ16_isMenuActive()) {
+            displayRadio();
+            u8g2.sendBuffer();
+          }
         }
       }
       else if (ir_code == rcCmdArrowLeft) // strzałka w lewo - poprzednia stacja, bank lub nastawy equalizera
@@ -9451,6 +9756,13 @@ void loop()
           }
         bankMenuDisplay();  
         }
+        else if (eq16MenuActive == true)  // 16-BAND EQ NAVIGATION
+        {
+          Serial.println("DEBUG EQ16: Arrow LEFT - selecting previous band");
+          Serial.println("DEBUG EQ16: Calling EQ16_selectPrevBand()");
+          EQ16_selectPrevBand();
+          EQ16_displayMenu(); // Odśwież wyświetlacz
+        }
         else if (equalizerMenuEnable == true)
         {
           if (toneSelect == 1) {toneHiValue--;}
@@ -9460,7 +9772,8 @@ void loop()
           if (toneHiValue < -40) {toneHiValue = -40;}
           if (toneMidValue < -40) {toneMidValue = -40;}
           if (toneLowValue < -40) {toneLowValue = -40;}
-         
+          
+          if (!useEQ16) applyEqualizerSettings();  // Apply 3-point EQ changes
           displayEqualizer();
         }     
         else if (listedStations == true)
@@ -9488,8 +9801,10 @@ void loop()
           //if (station_nr < 1) { station_nr = 1; }
           if (station_nr < 1) { station_nr = stationsCount; } // Przwijanie listy stacji w pętli po osiągnieciu ostatniej stacji banku przewijamy do pierwszej.
           changeStation();
-          displayRadio();
-          u8g2.sendBuffer();
+          if (!EQ16_isMenuActive()) {
+            displayRadio();
+            u8g2.sendBuffer();
+          }
         }
       }
       else if ((ir_code == rcCmdArrowUp) && (volumeSet == false) && (equalizerMenuEnable == true))
@@ -9497,6 +9812,13 @@ void loop()
         toneSelect--;
         if (toneSelect < 1){toneSelect = 1;}
         displayEqualizer();
+      }
+      else if ((ir_code == rcCmdArrowUp) && (eq16MenuActive == true))
+      {
+        Serial.println("DEBUG EQ16: Arrow UP - increasing gain of selected band");
+        Serial.println("DEBUG EQ16: Calling EQ16_increaseBandGain()");
+        EQ16_increaseBandGain();
+        EQ16_displayMenu(); // Odśwież wyświetlacz
       }
       else if ((ir_code == rcCmdArrowUp) && (equalizerMenuEnable == false))// Przycisk w góre
       {  
@@ -9511,32 +9833,40 @@ void loop()
         displayStartTime = millis();    
         station_nr = currentSelection + 1;
 
-        if (listedStations == true) {station_nr--; scrollUp();} //station_nr-- tylko jesli już wyswietlany liste stacji;
+        if (listedStations == true) 
+        {
+          // Lista już otwarta - przewijaj w górę
+          station_nr--; 
+          scrollUp();
+        } 
         else
         {        
-          currentSelection = station_nr - 1; // Przywracamy zaznaczenie obecnie grajacej stacji
+          // Pierwsze naciśnięcie UP - otwórz listę stacji
+          listedStations = true;
+          Serial.println("DEBUG: UP pressed - opening stations list");
+          currentSelection = station_nr - 1; // Ustaw zaznaczenie na obecnie grającą stację
           
+          // Dostosuj widok żeby pokazać aktualną stację
           if (currentSelection >= 0)
           {
-            if (currentSelection < firstVisibleLine) // jezeli obecne zaznaczenie ma wartosc mniejsza niz pierwsza wyswietlana linia
+            if (currentSelection < firstVisibleLine) 
             {
               firstVisibleLine = currentSelection;
             }
+            else if (currentSelection >= firstVisibleLine + maxVisibleLines)
+            {
+              firstVisibleLine = currentSelection - maxVisibleLines + 1;
+            }
           } 
           else 
-          {  // Jeśli osiągnięto wartość 0, przejdź do najwyższej wartości
-            if (currentSelection = maxSelection())
-            {
-            firstVisibleLine = currentSelection - maxVisibleLines + 1;  // Ustaw pierwszą widoczną linię na najwyższą
-            }
+          {  
+            currentSelection = 0;
+            firstVisibleLine = 0;
           }   
         }
         
         if (station_nr < 1) { station_nr = stationsCount; } // jesli dojdziemy do początku listy stacji to przewijamy na koniec
         
-        
-       
-       
         displayStations();
       }
       else if ((ir_code == rcCmdArrowDown) && (volumeSet == false) && (equalizerMenuEnable == true))
@@ -9544,6 +9874,13 @@ void loop()
         toneSelect++;
         if (toneSelect > 3){toneSelect = 3;}
         displayEqualizer();
+      }
+      else if ((ir_code == rcCmdArrowDown) && (eq16MenuActive == true))
+      {
+        Serial.println("DEBUG EQ16: Arrow DOWN - decreasing gain of selected band");
+        Serial.println("DEBUG EQ16: Calling EQ16_decreaseBandGain()");
+        EQ16_decreaseBandGain();
+        EQ16_displayMenu(); // Odśwież wyświetlacz
       }
       else if ((ir_code == rcCmdArrowDown) && (equalizerMenuEnable == false)) // Przycisk w dół
       {  
@@ -9599,10 +9936,31 @@ void loop()
           fetchStationsFromServer(); // Ładujemy stacje z karty lub serwera 
           bankMenuEnable = false;
         }  
-        if (equalizerMenuEnable == true) { saveEqualizerOnSD();}    // zapis ustawien equalizera
+        if (equalizerMenuEnable == true) { 
+          saveEqualizerOnSD();    // zapis ustawien equalizera (już ma delay i displayRadio)
+          Serial.println("DEBUG: 3-point equalizer settings saved via OK button");
+          // Wyłączamy menu equalizera po zapisie
+          equalizerMenuEnable = false;
+          return; // Kończymy obsługę - nie wykonujemy changeStation()
+        }
+        if (eq16MenuActive == true) { 
+          // Komunikat o zapisie EQ16
+          u8g2.clearBuffer();
+          u8g2.setFont(u8g2_font_fub14_tf);
+          u8g2.drawStr(1, 33, "Saving EQ16 settings");
+          u8g2.sendBuffer();
+          EQ16_autoSave(); 
+          Serial.println("DEBUG: EQ16 settings saved via OK button");
+          // Wyłączamy menu EQ16 po zapisie
+          EQ16_setMenuActive(false);
+          eq16MenuActive = false;
+          delay(1000); // Pokazujemy komunikat przez sekundę
+          displayRadio(); // Powracamy do głównego ekranu
+          return; // Kończymy obsługę - nie wykonujemy changeStation()
+        }
         //if (volumeSet == true) { saveVolumeOnSD();}                 // zapis ustawien głośnosci po nacisnięciu OK, wyłaczony aby można było przełączyć stacje na www bez czekania
         //if ((equalizerMenuEnable == false) && (volumeSet == false)) // jesli nie zapisywaliśmy equlizer i glonosci to wywolujemy ponizsze funkcje
-        if ((equalizerMenuEnable == false)) // jesli nie zapisywaliśmy equlizer 
+        if ((equalizerMenuEnable == false) && (eq16MenuActive == false)) // jesli nie zapisywaliśmy zadnego equalizera 
         {
           // Jesli zadna flaga nie jest ustawiona to:
           //Serial.print("url2play: ");
@@ -9612,13 +9970,41 @@ void loop()
 
           else if (urlPlaying) { webUrlStationPlay();}
           clearFlags();                                             // Czyscimy wszystkie flagi przebywania w różnych menu
-          displayRadio();
-          u8g2.sendBuffer();
+          if (!EQ16_isMenuActive()) {
+            displayRadio();
+            u8g2.sendBuffer();
+          }
         }
         equalizerMenuEnable = false; // Kasujemy flage ustawiania equalizera
         volumeSet = false; // Kasujemy flage ustawiania głośnosci
       } 
-      else if (ir_code == rcCmdKey0) {rcInputKey(0);}
+      else if (ir_code == rcCmdKey0) {
+        // Sprawdź czy to 3-krotne naciśnięcie dla EQ16
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastKey0Press > KEY0_TIMEOUT) {
+          // Timeout - reset licznika
+          key0ClickCount = 0;
+        }
+        
+        key0ClickCount++;
+        lastKey0Press = currentTime;
+        
+        Serial.printf("DEBUG: Key0 pressed %d times\n", key0ClickCount);
+        
+        if (key0ClickCount >= 3) {
+          // 3-krotne naciśnięcie - przełącz system EQ (3-punktowy ↔ 16-pasmowy)
+          Serial.println("DEBUG: Triple Key0 press detected - switching EQ system!");
+          key0ClickCount = 0; // Reset licznika
+          
+          // Przełącz między systemami
+          switchEqualizerSystem();
+          
+        } else {
+          // Zwykłe naciśnięcie - normalna funkcja
+          rcInputKey(0);
+        }
+      }
       else if (ir_code == rcCmdKey1) {rcInputKey(1);}     
       else if (ir_code == rcCmdKey2) {rcInputKey(2);}     
       else if (ir_code == rcCmdKey3) {rcInputKey(3);}     
@@ -9632,8 +10018,10 @@ void loop()
       {   
         displayDimmer(0);
         clearFlags();   // Zerujemy wszystkie flagi
-        displayRadio(); // Ładujemy erkran radia
-        u8g2.sendBuffer(); // Wysyłamy bufor na wyswietlacz
+        if (!EQ16_isMenuActive()) {
+          displayRadio(); // Ładujemy erkran radia
+          u8g2.sendBuffer(); // Wysyłamy bufor na wyswietlacz
+        }
         currentSelection = station_nr - 1; // Przywracamy zaznaczenie obecnie grajacej stacji
       }
       else if (ir_code == rcCmdMute) 
@@ -9647,7 +10035,9 @@ void loop()
         {
           audio.setVolume(volumeValue);   
         }
-        displayRadio();
+        if (!EQ16_isMenuActive()) {
+          displayRadio();
+        }
         wsVolumeChange(volumeValue);
       }
       else if (ir_code == rcCmdDirect) // Przycisk Direct -> Menu Bank - udpate GitHub, Menu Equalizer - reset wartosci, Radio Display - fnkcja przyciemniania ekranu
@@ -9677,16 +10067,6 @@ void loop()
           }
         }
       }      
-      else if (ir_code == rcCmdSrc) 
-      {
-        displayMode++;
-        // Jeśli analizator włączony, pozwól na tryby 5 i 6
-        uint8_t maxMode = eqAnalyzerOn ? 6 : displayModeMax;
-        if (displayMode > maxMode) {displayMode = 0;}
-        displayRadio();
-        clearFlags();
-        ActionNeedUpdateTime = true;
-      }
       else if (ir_code == rcCmdRed)   {powerOff();}
       else if (ir_code == rcCmdPower) {powerOff();}
       else if (ir_code == rcCmdGreen) {sleepTimerSet();}   
@@ -9710,7 +10090,68 @@ void loop()
         bankMenuDisplay();       
       }
      
-      else if (ir_code == rcCmdAud) {displayEqualizer();}
+      else if (ir_code == rcCmdSrc) 
+      {
+        Serial.printf("DEBUG: SRC button pressed! rcCmdSrc=0x%04X, ir_code=0x%08X\n", rcCmdSrc, ir_code);
+        // Gdy EQ16 menu jest aktywne, przycisk SRC wyłącza EQ16 i przełącza styl
+        if (EQ16_isMenuActive()) {
+          Serial.println("DEBUG: EQ16 active - SRC button: deactivating EQ16 and changing style");
+          EQ16_setMenuActive(false);
+          eq16MenuActive = false;
+          
+          // Przełącz styl
+          displayMode++;
+          uint8_t maxMode = eqAnalyzerOn ? 6 : displayModeMax;
+          if (displayMode > maxMode) {displayMode = 0;}
+          displayRadio();
+          clearFlags();
+          ActionNeedUpdateTime = true;
+        } else {
+          // Gdy EQ16 nie jest aktywne, normalna zmiana stylu
+          Serial.println("DEBUG: Normal style change");
+          displayMode++;
+          uint8_t maxMode = eqAnalyzerOn ? 6 : displayModeMax;
+          if (displayMode > maxMode) {displayMode = 0;}
+          displayRadio();
+          clearFlags();
+          ActionNeedUpdateTime = true;
+        }
+      }
+      else if (ir_code == rcCmdAud) 
+      {
+        Serial.printf("DEBUG: Audio/EQ button pressed - current system: %s\n", 
+                      useEQ16 ? "16-band EQ" : "3-point EQ");
+        
+        if (useEQ16 && EQ16_isEnabled()) {
+          // System EQ16 - toggle menu
+          if (!EQ16_isMenuActive()) {
+            Serial.println("DEBUG: Activating EQ16 menu");
+            EQ16_setMenuActive(true);
+            eq16MenuActive = true;
+            eq16BandMode = true;
+            EQ16_displayMenu();
+          } else {
+            Serial.println("DEBUG: Deactivating EQ16 menu - saving settings");
+            EQ16_autoSave();
+            EQ16_setMenuActive(false);
+            eq16MenuActive = false;
+            displayRadio();
+          }
+        } else {
+          // System 3-punktowy - toggle menu
+          if (!equalizerMenuEnable) {
+            Serial.println("DEBUG: Activating 3-point equalizer menu");
+            equalizerMenuEnable = true;
+            toneSelect = 1;
+            displayEqualizer();
+          } else {
+            Serial.println("DEBUG: Deactivating 3-point equalizer menu");
+            equalizerMenuEnable = false;
+            applyEqualizerSettings();
+            displayRadio();
+          }
+        }
+      }
       else { Serial.println("Inny przycisk"); }
     }
     else
@@ -9769,7 +10210,9 @@ void loop()
       { 
         f_audioInfoRefreshDisplayRadio = false;
         ActionNeedUpdateTime = true;
-        displayRadio();
+        if (!EQ16_isMenuActive()) {
+          displayRadio();
+        }
       } 
 
       if (wsAudioRefresh == true) // Web Socket StremInfo wymaga odswiezenia
@@ -9779,10 +10222,11 @@ void loop()
       }
     }
 
-    if (volumeMute == false) 
-    {
-      if (vuMeterOn)
-      { 
+    // Wyłącz VU meter gdy EQ16 menu jest aktywne
+    if (vuMeterOn && !EQ16_isMenuActive())
+    { 
+      // Style 0, 3, 4 tylko gdy nie mute
+      if (volumeMute == false) {
         if (displayMode == 0) {vuMeterMode0();}
         if (displayMode == 3) {vuMeterMode3();}
         if (displayMode == 4) 
@@ -9797,15 +10241,28 @@ void loop()
             }
           }
         }
-        if (displayMode == 5) {vuMeterMode5();}
-        if (displayMode == 6) {vuMeterMode6();}
-        if (displayMode == 7) {vuMeterMode7();}  // Nowy styl: Okrągły
-        if (displayMode == 8) {vuMeterMode8();}  // Nowy styl: Liniowy
-        if (displayMode == 9) {vuMeterMode9();}  // Nowy styl: Spadające gwiazdki jak śnieg
       }
-      else if (displayMode == 0) {showIP(1,47);} //y = vuRy
+      
+      // Style 5-9 zawsze (również podczas mute dla animacji)
+      if (displayMode == 5) {vuMeterMode5();}
+      if (displayMode == 6) {vuMeterMode6();}
+      if (displayMode == 7) {vuMeterMode7();}  // Nowy styl: Okrągły
+      if (displayMode == 8) {vuMeterMode8();}  // Nowy styl: Liniowy
+      if (displayMode == 9) {vuMeterMode9();}  // Nowy styl: Spadające gwiazdki jak śnieg
+        
+      // Powiedz analizatorowi, że ma spać gdy style 5-9 nie są aktywne
+      if (displayMode < 5 || displayMode > 9) {
+        eq_analyzer_set_runtime_active(false);
+      }
     }
-    else // Obsługa wyciszenia dzwięku, wprowadzamy napis MUTE na ekran
+    else if (displayMode == 0) {showIP(1,47);} //y = vuRy
+    else {
+      // Gdy vuMeter jest wyłączony, analizator też może spać
+      eq_analyzer_set_runtime_active(false);
+    }
+
+    // Tylko starsze style (0-4) pokazują napis MUTED - nowe style 5 i 6 mają swoją obsługę mute za ikonką głośnika
+    if (volumeMute && displayMode >= 0 && displayMode <= 4) 
     {
       u8g2.setDrawColor(0);
       if (displayMode == 0) {u8g2.drawStr(0,48, "> MUTED <");}
@@ -9821,11 +10278,16 @@ void loop()
     {
       urlToPlay = false;
       webUrlStationPlay();
-      displayRadio();
+      if (!EQ16_isMenuActive()) {
+        displayRadio();
+      }
     }
     
-    displayRadioScroller();  // wykonujemy przewijanie tekstu station stringi przygotowujemy bufor ekranu
-    u8g2.sendBuffer();  // rysujemy całą zawartosc ekranu.
+    // Nie wywołuj displayRadioScroller gdy EQ16 menu jest aktywne  
+    if (!EQ16_isMenuActive()) {
+      displayRadioScroller();  // wykonujemy przewijanie tekstu station stringi przygotowujemy bufor ekranu
+      u8g2.sendBuffer();  // rysujemy całą zawartosc ekranu.
+    }
     
     //if (f_callInfo) {f_callInfo = false; displayBasicInfo();}  
     

@@ -1,0 +1,126 @@
+//=============================================================================
+// EQ16 INTEGRATION GUIDE - DODAJ TE FRAGMENTY DO main.cpp
+//=============================================================================
+
+/*
+⚠️ INSTRUKCJE INTEGRACJI EQ16:
+
+1. DODAJ NA POCZĄTKU (po include bibliotek):
+   #include "EQ16_GraphicEQ.h"
+
+2. DODAJ W setup():
+   EQ16_init();
+   EQ16_enable(true); // lub false jeśli chcesz startować wyłączony
+
+3. DODAJ W OBSŁUDZE ENKODERA (funkcja rotary_loop lub podobna):
+   
+   if (EQ16_isMenuActive()) {
+       // Menu EQ16 aktywne - obsługuj nawigację
+       if (rotaryEncoder.wasRotated()) {
+           int direction = rotaryEncoder.getDirection();
+           
+           if (encoder_state == ENC_MENU_ITEM) {
+               // Zmiana pasma
+               if (direction == 1) {
+                   EQ16_selectNextBand();
+               } else {
+                   EQ16_selectPrevBand();
+               }
+           }
+           else if (encoder_state == ENC_MENU_VALUE) {
+               // Zmiana gain
+               if (direction == 1) {
+                   EQ16_increaseBandGain();
+               } else {
+                   EQ16_decreaseBandGain();
+               }
+           }
+       }
+       
+       if (rotaryEncoder.wasPressed()) {
+           // Przełączanie trybu wybór pasma <-> zmiana gain
+           if (encoder_state == ENC_MENU_ITEM) {
+               encoder_state = ENC_MENU_VALUE;
+           } else {
+               encoder_state = ENC_MENU_ITEM;
+           }
+       }
+       
+       // Wyświetl menu EQ16 zamiast normalnego
+       EQ16_displayMenu();
+       return; // Nie rób nic więcej gdy menu EQ16 aktywne
+   }
+
+4. DODAJ PRZYCISK AKTYWACJI MENU EQ (np. długie przytrzymanie):
+   
+   // Przykład - w obsłudze długiego przytrzymania enkodera:
+   if (longPressDetected) {
+       if (!EQ16_isMenuActive()) {
+           EQ16_setMenuActive(true);
+           encoder_state = ENC_MENU_ITEM;
+       } else {
+           EQ16_setMenuActive(false);
+           encoder_state = ENC_MENU_VALUE; // lub twój normalny stan
+       }
+   }
+
+5. DODAJ W PĘTLI GŁÓWNEJ (loop()):
+   EQ16_autoSave(); // Automatyczny zapis co 5 sekund
+
+6. INTEGRACJA Z AUDIO (jeśli masz przetwarzanie audio):
+   
+   // W funkcji przetwarzania audio:
+   if (EQ16_isEnabled()) {
+       EQ16_processStereo(leftSamples, rightSamples, sampleCount);
+   }
+
+7. OPCJONALNE CALLBACKI:
+   
+   // Możesz dodać te funkcje jeśli chcesz dodatkowe akcje:
+   void EQ16_onMenuEnter() {
+       // Wykonaj gdy wchodzisz do menu EQ
+       Serial.println("Weszło do menu EQ16");
+   }
+   
+   void EQ16_onMenuExit() {
+       // Wykonaj gdy wychodzisz z menu EQ  
+       Serial.println("Wyszło z menu EQ16");
+   }
+   
+   void EQ16_onSettingsChanged() {
+       // Wykonaj gdy zmieniają się ustawienia
+       Serial.println("Ustawienia EQ16 się zmieniły");
+   }
+
+8. STRUKTURA ENCODER STATES (dodaj do enum):
+   
+   enum encoder_state_t {
+       // ... twoje istniejące stany
+       ENC_EQ16_BAND,    // Wybór pasma EQ16
+       ENC_EQ16_GAIN     // Zmiana gain EQ16
+   };
+
+═══════════════════════════════════════════════════════════════════════════
+
+💡 PRZYKŁAD UŻYCIA:
+
+1. Kompiluj projekt - powinien się skompilować bez błędów
+2. Po starcie radia EQ16 będzie wyłączony
+3. Długie przytrzymanie enkodera → wejście do menu EQ16
+4. Obracanie enkodera → wybór pasma (1-16)
+5. Krótkie naciśnięcie → przełączenie na tryb zmiany gain
+6. Obracanie enkodera → zmiana gain (-12dB do +12dB)
+7. Długie przytrzymanie → wyjście z menu EQ16
+8. Ustawienia są automatycznie zapisywane na SD
+
+═══════════════════════════════════════════════════════════════════════════
+
+🔧 MOŻLIWE ROZSZERZENIA:
+
+1. Dodaj preset menu (Rock, Pop, Jazz, Classical itp.)
+2. Dodaj wizualizację analizatora z nakładką EQ
+3. Dodaj możliwość reset wybranego pasma
+4. Dodaj kopię/paste ustawień między pasmami
+5. Dodaj curve smoothing między pasmami
+
+*/
