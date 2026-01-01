@@ -11,4 +11,8 @@ Dodana obsługa korektora 16  pełen zakres sterowanie z pilota Jest możliwośc
 Po uruchominiu wybiramy przycisk uruchamiający equalizer (AUD) 
 Ukazuje sie nam menu EQ obsługa taka sama jak EQ 3 
 
+Edycja stylu 10 Uruchomienie chwilowe w menu setingu.
+<img width="1080" height="636" alt="image" src="https://github.com/user-attachments/assets/9602b57a-5a78-4ff7-ba11-6778b2cd9efa" />
+
+
 
