@@ -37,6 +37,20 @@ void  eq_analyzer_print_diagnostics(void);
 // Generator testowy (opcjonalnie)
 void  eq_analyzer_enable_test_generator(bool en);
 
+// Ustawienia specjalne dla FLAC
+void  eq_analyzer_set_flac_mode(bool enable);
+
+// ======================= NOWE FUNKCJE OPTYMALIZACJI =======================
+
+// Statystyki wydajności
+uint32_t eq_analyzer_get_dropped_frames(void);    // ile ramek zostało porzuconych
+void     eq_analyzer_reset_stats(void);           // reset statystyk
+uint32_t eq_analyzer_get_queue_length(void);      // obecna długość kolejki
+float    eq_analyzer_get_cpu_load(void);          // szacunkowe obciążenie CPU (%)
+
+// Kontrola częstotliwości update UI (domyślnie ~33Hz)
+void     eq_analyzer_set_update_rate(uint32_t hz); // ustaw częstotliwość 20-60Hz
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

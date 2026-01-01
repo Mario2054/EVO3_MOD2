@@ -17,7 +17,6 @@
 
 #include "Arduino.h"           // Standardowy nagłówek Arduino, który dostarcza podstawowe funkcje i definicje
 #include <WiFiManager.h>       // Biblioteka do zarządzania konfiguracją sieci WiFi, opis jak ustawić połączenie WiFi przy pierwszym uruchomieniu jest opisany tu: https://github.com/tzapu/WiFiManager
-#include "Audio.h"             // Biblioteka do obsługi funkcji związanych z dźwiękiem i audio
 #include "SPI.h"               // Biblioteka do obsługi komunikacji SPI
 #include "FS.h"                // Biblioteka do obsługi systemu plików
 #include <U8g2lib.h>           // Biblioteka do obsługi wyświetlaczy
@@ -30,10 +29,14 @@
 #include <AsyncTCP.h>          // Bliblioteka TCP dla serwera web
 #include <Update.h>            // Blibioteka dla aktulizacji OTA
 #include <ESPmDNS.h>           // Blibioteka mDNS dla ESP
+#include "Audio.h"             // Local Audio class
 #include "EQ_AnalyzerDisplay.h"  // FFT analyzer (styles 5/6)
 #include "EQ_FFTAnalyzer.h"    // FFT analyzer functions
 #include "EQ16_GraphicEQ.h"     // 16-Band Graphic Equalizer
 
+// Forward declarations
+void displayEqualizer();
+void saveConfig();
 
 #include "soc/rtc_cntl_reg.h"   // Biblioteki ESP aby móc zrobic pełny reset 
 #include "soc/rtc_cntl_struct.h"// Biblioteki ESP aby móc zrobic pełny reset 
@@ -41,6 +44,52 @@
 #include "esp_system.h"
 
 #include "rom/gpio.h"  // Biblioteka do mapowania pinu CS_SD
+
+// CPU Monitoring includes
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+
+// CPU Usage monitoring variables
+static unsigned long lastCpuCheck = 0;
+static TaskHandle_t cpuMonitorTask = NULL;
+
+// CPU Usage monitoring functions - SIMPLIFIED VERSION
+void printCpuUsage() {
+    // Simple memory monitoring only
+    Serial.printf("Free Heap: %d bytes | Free PSRAM: %d bytes\n", 
+                  ESP.getFreeHeap(), ESP.getFreePsram());
+}
+
+void cpuMonitorTaskFunc(void *parameter) {
+    while (true) {
+        printCpuUsage();
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Co 5 sekund
+    }
+}
+
+void startCpuMonitoring() {
+    if (cpuMonitorTask == NULL) {
+        xTaskCreatePinnedToCore(
+            cpuMonitorTaskFunc,   // Task function
+            "CPU_Monitor",        // Task name
+            4096,                 // Stack size increased to 4KB
+            NULL,                 // Parameter
+            1,                    // Priority
+            &cpuMonitorTask,      // Task handle
+            1                     // Core (1 = Core 1)
+        );
+        Serial.println("CPU Monitoring started on Core 1");
+    }
+}
+
+void stopCpuMonitoring() {
+    if (cpuMonitorTask != NULL) {
+        vTaskDelete(cpuMonitorTask);
+        cpuMonitorTask = NULL;
+        Serial.println("CPU Monitoring stopped");
+    }
+}
 
 // Deklaracja wersji oprogramowania i nazwy hosta widocznego w routerze oraz na ekranie OLED i stronie www
 #define softwareRev "v3.19.53"  // Wersja oprogramowania radia
@@ -131,7 +180,7 @@ const bool f_powerOffAnimation = 0; // Animacja przy power OFF
 uint8_t analyzerStylesMode = 2;     // 0=0-4-5, 1=0-4-6, 2=0-4-5-6-7-8-9 (wszystkie)
 uint8_t analyzerCurrentPreset = 0;  // Aktualny preset analizatora (0-4)
 // Maksymalny numer stylu ekranu (dynamicznie obliczany na podstawie analyzerStylesMode)
-uint8_t displayModeMax = 9;         // WSZYSTKIE style 0..9 z analizatorem FFT
+uint8_t displayModeMax = 10;         // WSZYSTKIE style 0..10 z analizatorem FFT i Floating Peaks
 
 // DEBUG PRINTS - ON/OFF
 #define f_debug_web_on 0         // Flaga właczenia wydruku debug_web
@@ -359,8 +408,6 @@ const int vuYmode3 = 62;                   // Polozenie wyokosci (Y) VU w trybie
 bool vuPeakHoldOn = 1;                     // Flaga okreslajaca czy funkcja Peak & Hold na wskazniku VUmeter jest wlaczona
 bool vuMeterOn = true;                     // Flaga właczajaca wskazniki VU
 bool eqAnalyzerOn = true;                // FFT analyzer on/off for styles 5 & 6 (from Web UI) - DOMYŚLNIE WŁĄCZONY
-uint8_t eqLevel[EQ_BANDS] = {0};           // Current bar height 0-100
-uint8_t eqPeak[EQ_BANDS] = {0};            // Peak position for each bar
 
 // ============================================================================
 // 16-BAND GRAPHIC EQUALIZER
@@ -915,7 +962,7 @@ const char config_html[] PROGMEM = R"rawliteral(
   <tr><td>OLED Display Clock in Sleep Mode default:Off</td><td><input type="checkbox" name="f_displayPowerOffClock" value="1" %S19_checked></td></tr>
   <tr><td>OLED Display Power Save Mode, default:Off</td><td><input type="checkbox" name="displayPowerSaveEnabled" value="1" %S9_checked></td></tr>
   <tr><td>OLED Display Power Save Time (1-600sek.), default:20</td><td><input type="number" name="displayPowerSaveTime" min="1" max="600" value="%D9"></td></tr>
-  <tr><td>OLED Display Mode: 0-Radio, 1-Clock, 2-Lines, 3-Minimal, 4-VU, 5-Analyzer, 6-Segments, 7-Circles, 8-Lines, 9-Snow</td><td><input type="number" name="displayMode" min="0" max="9" value="%D6"></td></tr>
+  <tr><td>OLED Display Mode: 0-Radio, 1-Clock, 2-Lines, 3-Minimal, 4-VU, 5-Analyzer, 6-Segments, 7-Circles, 8-Lines, 9-Snow, 10-FloatingPeaks</td><td><input type="number" name="displayMode" min="0" max="10" value="%D6"></td></tr>
 
   <tr><th>Other Setting</th><th></th></tr>
   <tr><td>Time Voice Info Every Hour, default:On</td><td><input type="checkbox" name="timeVoiceInfoEveryHour" value="1" %S3_checked></td></tr>
@@ -2712,8 +2759,10 @@ void fetchStationsFromServer()
       //  return;  // Przerwij dalsze działanie, jeśli nie udało się utworzyć pliku
       }
     }
-    // Inicjalizuj żądanie HTTP do podanego adresu URL
+    // Inicjalizuj żądanie HTTP do podanego adresu URL z timeout
     http.begin(url);
+    http.setTimeout(3000); // 3 sekundy timeout dla szybkiego startu
+    http.setConnectTimeout(2000); // 2 sekundy na połączenie
 
     // Wykonaj żądanie GET i zapisz kod odpowiedzi HTTP
     int httpCode = http.GET();
@@ -3231,6 +3280,9 @@ void switchEqualizerSystem() {
   // Apply new settings
   applyEqualizerSettings();
   
+  // Save configuration to remember EQ system preference
+  saveConfig();
+  
   Serial.printf("DEBUG: Switched to %s equalizer system\n", useEQ16 ? "EQ16 (16-band)" : "3-point");
   
   // Show brief message on display
@@ -3248,8 +3300,11 @@ void audio_process_i2s(int16_t* outBuff, int32_t validSamples, bool* continueI2S
   // Push audio samples to EQ analyzer (validSamples is number of stereo frames)
   eq_analyzer_push_samples_i16((const int16_t*)outBuff, validSamples);
   
-  // Process audio through 16-band graphic equalizer
-  if (useEQ16 && EQ16_isEnabled()) {
+  // Używamy domyślnie 3-punktowego equalizera z audio.setTone() - bez EQ16
+  // EQ16 pozostaje wyłączony domyślnie dla lepszej wydajności procesora
+  if (false && useEQ16 && EQ16_isEnabled()) {
+    // EQ16 processing - wyłączone domyślnie
+    
     // outBuff format: [L0,R0,L1,R1,L2,R2...] (interleaved stereo)
     // validSamples = number of stereo frames (pairs)
     
@@ -3262,8 +3317,8 @@ void audio_process_i2s(int16_t* outBuff, int32_t validSamples, bool* continueI2S
       leftFloat = EQ16_processSample(leftFloat, rightFloat, true);   // Left channel
       rightFloat = EQ16_processSample(rightFloat, leftFloat, false); // Right channel
       
-      // Apply 100x attenuation to prevent clipping from EQ16 gain  
-      const float EQ16_ATTENUATION = 0.01f;  // 1/100 = 0.01 (100x reduction)
+      // Apply maximum attenuation to eliminate all overload (+2dB more)
+      const float EQ16_ATTENUATION = 0.04f;  // 1/25 = 0.04 (about -28dB total)
       leftFloat *= EQ16_ATTENUATION;
       rightFloat *= EQ16_ATTENUATION;
       
@@ -3387,10 +3442,11 @@ void my_audio_info(Audio::msg_t m)
       // --- Rozpoznawanie dekodera / formatu ---
       if (msg.indexOf("MP3Decoder") != -1)
       {
-        mp3 = true; 
+        mp3 = true;
         flac = false; aac = false; vorbis = false; opus = false;
         streamCodec = "MP3";
         Serial.println("[AUDIO] Codec: MP3 detected");
+        eq_analyzer_set_flac_mode(false);
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
       }
@@ -3400,7 +3456,8 @@ void my_audio_info(Audio::msg_t m)
         mp3 = false; aac = false; vorbis = false; opus = false;
         streamCodec = "FLAC";
         Serial.println("[AUDIO] Codec: FLAC detected");
-        // Resetuj analizator dla nowego formatu
+        // Resetuj analizator dla nowego formatu i włącz tryb FLAC
+        eq_analyzer_set_flac_mode(true);
         eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
@@ -3412,6 +3469,7 @@ void my_audio_info(Audio::msg_t m)
         streamCodec = "AAC";
         Serial.println("[AUDIO] Codec: AAC detected");
         // Resetuj analizator dla nowego formatu
+        eq_analyzer_set_flac_mode(false);
         eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
@@ -3422,6 +3480,7 @@ void my_audio_info(Audio::msg_t m)
         aac = false; flac = false; mp3 = false; opus = false;
         streamCodec = "VRB";
         Serial.println("[AUDIO] Codec: VORBIS detected");
+        eq_analyzer_set_flac_mode(false);
         eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
@@ -3432,6 +3491,7 @@ void my_audio_info(Audio::msg_t m)
         aac = false; flac = false; mp3 = false; vorbis = false;
         streamCodec = "OPUS";
         Serial.println("[AUDIO] Codec: OPUS detected");
+        eq_analyzer_set_flac_mode(false);
         eq_analyzer_reset();
         f_audioInfoRefreshDisplayRadio = true; // refresh displayRadio screen
         wsAudioRefresh = true;  //Web Socket - audio refresh    
@@ -3631,29 +3691,10 @@ void handleButtons()
 
       // Jeśli przycisk jest wciśnięty przez co najmniej 3 sekundy i akcja jeszcze nie była wykonana
       if (millis() - buttonPressTime2 >= buttonLongPressTime2 && !action2Taken && millis() - buttonPressTime2 < buttonSuperLongPressTime2) {
-        // Przełączanie między Bank Menu a EQ16 Menu - tylko jeśli EQ16 jest włączone
-        Serial.printf("DEBUG: Long press detected, EQ16_isEnabled()=%s\n", EQ16_isEnabled() ? "true" : "false");
-        if (EQ16_isEnabled()) {
-          if (!eq16MenuActive) {
-            Serial.println("debug--EQ16 Menu Activated");
-            eq16MenuActive = true;
-            eq16BandMode = true;  // Zaczynamy od wyboru pasma
-            EQ16_setMenuActive(true);
-            EQ16_displayMenu();
-          } else {
-            Serial.println("debug--EQ16 Menu Deactivated, switching to Bank Menu");
-            eq16MenuActive = false;
-            EQ16_setMenuActive(false);
-            bankMenuDisplay();
-          }
-        } else {
-          // EQ16 jest wyłączone - pokaż komunikat lub przejdź do zwykłego menu
-          Serial.println("debug--EQ16 jest wyłączone w ustawieniach");
-          bankMenuDisplay();
-        }
-        
-        // Ustawiamy flagę akcji, aby wykonała się tylko raz
-        action2Taken = true;
+        // Zawsze otwieramy elegancki 3-punktowy equalizer jako domyślny
+        Serial.println("debug--Opening 3-Point Equalizer Menu");
+        displayEqualizer(); // Wywołujemy oryginalną elegancką funkcję menu equalizera
+        action2Taken = true; // Oznaczamy, że akcja została wykonana
       }
     }
   } 
@@ -6648,7 +6689,7 @@ void handleEncoder2VolumeStationsClick()
       }
       else 
       {  // Jeśli osiągnięto wartość 0, przejdź do najwyższej wartości
-        if (currentSelection = maxSelection())
+        if (currentSelection == maxSelection())
         {
         firstVisibleLine = currentSelection - maxVisibleLines + 1;  // Ustaw pierwszą widoczną linię na najwyższą
         }
@@ -6827,6 +6868,7 @@ void saveConfig()
       myFile.println("FFT Analyzer for Style 5-8 =" + String(eqAnalyzerOn ? 1 : 0) + ";");
       myFile.println("Analyzer Styles Mode =" + String(analyzerStylesMode) + ";");
       myFile.println("Analyzer Current Preset =" + String(analyzerCurrentPreset) + ";");
+      myFile.println("Use EQ16 System =" + String(useEQ16 ? 1 : 0) + ";");
       myFile.close();
       Serial.println("Utworzono i zapisano config.txt na karcie SD");
     } 
@@ -7001,6 +7043,9 @@ void readConfig()
   // Nowe parametry analizatora (używamy wartości bezpośrednio, bez sprawdzania != 0)
   analyzerStylesMode = configArray[25];       // 0=0-4-5, 1=0-4-6, 2=wszystkie
   analyzerCurrentPreset = configArray[26];    // 0=Classic, 1=Modern, 2=Compact, 3=Retro, 4=Custom
+  
+  // EQ system preference (EQ16 vs 3-point)
+  useEQ16 = (configArray[27] != 0);           // true=EQ16, false=3-point EQ
   
   // Zastosuj ustawienia analizatora
   analyzerSetStyleMode(analyzerStylesMode);
@@ -8251,7 +8296,7 @@ void setup()
   audio.setVolume(0);
   
   // Optymalizacja prędkości połączeń audio
-  audio.setConnectionTimeout(8, 10); // connection timeout 8s, data timeout 10s (domyślnie 20s, 30s)
+  audio.setConnectionTimeout(5, 6); // connection timeout 5s, data timeout 6s (szybszy start)
 
   // Inicjalizacja SPI z nowymi pinami dla czytnika kart SD
   customSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);  // SCLK = 45, MISO = 21, MOSI = 48, CS = 47
@@ -8348,6 +8393,9 @@ void setup()
   eq_analyzer_init();
   eq_analyzer_set_enabled(eqAnalyzerOn);   // Set initial state from config
 if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku config.txt to go tworzymy
+
+  // Apply equalizer settings after config is loaded
+  applyEqualizerSettings();  // Apply EQ system preference from config
   
 
   if ((esp_reset_reason() != ESP_RST_POWERON) || (!f_sleepAfterPowerFail))
@@ -8362,7 +8410,7 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     {
       u8g2.drawXBMP(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, logo_bits); // obrazek - logo z pamieci
       u8g2.sendBuffer();
-      delay(200); // Jeszcze szybsze uruchamianie
+      delay(50); // Przyspieszenie uruchamiania - zmniejszone z 200ms
     }   
     u8g2.setFont(u8g2_font_fub14_tf);
     //u8g2.clearBuffer();
@@ -8410,13 +8458,13 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
   
 
     
-  // Inicjalizacja WiFiManagera - optymalizacja prędkości
+  // Inicjalizacja WiFiManagera - optymalizacja prędkości (bardziej konserwatywna)
   wifiManager.setConfigPortalBlocking(false);
-  wifiManager.setConnectTimeout(8); // Max 8s na połączenie (szybsze)
-  wifiManager.setConfigPortalTimeout(30); // Portal config 30s (szybsze)
+  wifiManager.setConnectTimeout(12); // Zwiększone z 5s na 12s dla stabilnego połączenia
+  wifiManager.setConfigPortalTimeout(25); // Portal config 25s (rozsądny kompromis)
   wifiManager.setScanDispPerc(false); // Wyłącz wyświetlanie procentów
-  wifiManager.setMinimumSignalQuality(10); // Niższy próg jakości sygnału
-  wifiManager.setConnectRetries(2); // Tylko 2 próby połączenia
+  wifiManager.setMinimumSignalQuality(8); // Zwiększone z 5 na 8 dla lepszej jakości
+  wifiManager.setConnectRetries(2); // Przywrócone 2 próby połączenia
   wifiManager.setWiFiAutoReconnect(true); // Auto reconnect
   wifiManager.setCleanConnect(true); // Szybsze przełączanie
   wifiManager.setSaveConfigCallback([](){Serial.println("WiFi config saved");});
@@ -8424,9 +8472,8 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
   readStationFromSD();       // Odczytujemy zapisaną ostanią stację i bank z karty SD /EEPROMu
   readEqualizerFromSD();     // Odczytujemy ustawienia filtrów equalizera z karty SD 
   
-  // Initialize equalizer system - default to EQ16
-  useEQ16 = true;            // Start with 16-band EQ16 equalizer
-  applyEqualizerSettings();  // Apply current equalizer settings
+  // Initialize equalizer system - useEQ16 is read from config in readConfig()
+  // Note: useEQ16 value will be updated in readConfig(), no need to set default here
   
   readVolumeFromSD();        // Odczytujemy nastawę ostatniego poziomu głośnosci z karty SD /EEPROMu
   readAdcConfig();           // Odczyt konfiguracji klawitury ADC
@@ -8438,7 +8485,10 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
   //audio.setVolume(0);                  // Ustaw głośność na podstawie wartości zmiennej volumeValue w zakresie 0...21
   
   // ----------------- EKRAN - JASNOŚĆ -----------------
-  u8g2.setContrast(displayBrightness); 
+  u8g2.setContrast(displayBrightness);
+
+  // Start CPU monitoring - ENABLED
+  startCpuMonitoring(); 
 
   // -------------------- RECOVERY MODE --------------------
   recoveryModeCheck();
@@ -8462,7 +8512,7 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     u8g2.drawStr(5, 62, "Connected, IP:");  //wyswietlenie IP
     u8g2.drawStr(90, 62, currentIP.c_str());   //wyswietlenie IP
     u8g2.sendBuffer();
-    delay(150);  // Jeszcze bardziej skrócone opóźnienie
+    delay(50);  // Przyspieszenie - zmniejszone ze 150ms
     
     if (MDNS.begin(hostname)) { Serial.println("mDNS wystartowal, adres: " + String(hostname) + ".local w przeglądarce"); MDNS.addService("http", "tcp", 80);}
         
@@ -8471,10 +8521,10 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
     struct tm timeinfo;
     int retry = 0;
     Serial.println("debug RTC -> synchronizacja NTP pierwszy raz od startu");
-    while (!getLocalTime(&timeinfo) && retry < 3) // Zmniejszony retry z 5 na 3 
+    while (!getLocalTime(&timeinfo) && retry < 2) // Zmniejszony retry z 3 na 2 dla szybszego startu
     {
       Serial.println("debug RTC -> Czekam na synchronizację czasu NTP...");
-      delay(300); // Zmniejszone opóźnienie z 500ms na 300ms
+      delay(200); // Przyspieszenie - zmniejszone z 300ms na 200ms
       retry++;
     }
 
@@ -9014,8 +9064,19 @@ if (configExist == false) { saveConfig(); readConfig();} // Jesli nie ma pliku c
       // EQ16 Graphic Equalizer
       bool eq16Enabled = request->hasParam("eq16Enabled", true);
       Serial.printf("DEBUG: Web EQ16 setting: eq16Enabled=%s\n", eq16Enabled ? "true" : "false");
+      
+      // Update EQ system preference if it changed
+      bool oldUseEQ16 = useEQ16;
+      useEQ16 = eq16Enabled;
+      
       EQ16_enable(eq16Enabled);
       EQ16_saveToSD();  // Zapisz ustawienia EQ16 natychmiast
+      
+      // Save config if EQ system changed
+      if (oldUseEQ16 != useEQ16) {
+        saveConfig();
+        Serial.printf("DEBUG: EQ system changed via web - saved to config\n");
+      }
       Serial.println("DEBUG: EQ16 web settings saved");
       
       // Nowe parametry analizatora
@@ -9326,6 +9387,9 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s5_segHeight = (uint8_t)getInt("s5segH", c.s5_segHeight);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
   c.s5_showPeaks = getBool("s5peaks");
+  c.s5_barBrightness = (uint8_t)getInt("s5barBrightness", c.s5_barBrightness);
+  c.s5_peakBrightness = (uint8_t)getInt("s5peakBrightness", c.s5_peakBrightness);
+  c.s5_smoothness = (uint8_t)getInt("s5smooth", c.s5_smoothness);
 
   // Styl 6
   c.s6_width    = (uint8_t)getInt("s6w", c.s6_width);
@@ -9335,6 +9399,9 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
   c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
   c.s6_showPeaks = getBool("s6peaks");
+  c.s6_barBrightness = (uint8_t)getInt("s6barBrightness", c.s6_barBrightness);
+  c.s6_peakBrightness = (uint8_t)getInt("s6peakBrightness", c.s6_peakBrightness);
+  c.s6_smoothness = (uint8_t)getInt("s6smooth", c.s6_smoothness);
 
   // Styl 7 (Okrągły)
   c.s7_circleRadius = (uint8_t)getInt("s7radius", c.s7_circleRadius);
@@ -9358,8 +9425,29 @@ server.on("/analyzerSave", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
   c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
 
+  // Styl 10 (Floating Peaks - Ulatujące szczyty)
+  c.s10_barWidth = (uint8_t)getInt("s10barw", c.s10_barWidth);
+  c.s10_barGap = (uint8_t)getInt("s10gap", c.s10_barGap);
+  c.s10_segmentHeight = (uint8_t)getInt("s10segh", c.s10_segmentHeight);
+  c.s10_segmentGap = (uint8_t)getInt("s10segg", c.s10_segmentGap);
+  c.s10_maxPeaks = (uint8_t)getInt("s10maxp", c.s10_maxPeaks);
+  c.s10_peakHoldTime = (uint8_t)getInt("s10hold", c.s10_peakHoldTime);
+  c.s10_peakFloatSpeed = (uint8_t)getInt("s10speed", c.s10_peakFloatSpeed);
+  c.s10_peakFadeSteps = (uint8_t)getInt("s10fade", c.s10_peakFadeSteps);
+  c.s10_trailLength = (uint8_t)getInt("s10trail", c.s10_trailLength);
+  c.s10_showTrails = getBool("s10trails");
+  c.s10_smoothness = (uint8_t)getInt("s10smooth", c.s10_smoothness);
+  c.s10_barBrightness = (uint8_t)getInt("s10barbr", c.s10_barBrightness);
+  c.s10_peakBrightness = (uint8_t)getInt("s10peakbr", c.s10_peakBrightness);
+  c.s10_trailBrightness = (uint8_t)getInt("s10trailbr", c.s10_trailBrightness);
+  c.s10_peakMinHeight = (uint8_t)getInt("s10minh", c.s10_peakMinHeight);
+  c.s10_floatHeight = (uint8_t)getInt("s10floath", c.s10_floatHeight);
+  c.s10_enableAnimation = getBool("s10anim");
+
   // Globalne ustawienia
+  uint16_t oldPeakHold = c.peakHoldTimeMs;
   c.peakHoldTimeMs = (uint16_t)getInt("peakHoldMs", c.peakHoldTimeMs);
+  Serial.printf("DEBUG WEB: Analyzer config saved - peakHoldMs: %u -> %u\n", oldPeakHold, c.peakHoldTimeMs);
 
   analyzerSetStyle(c);
   analyzerStyleSave();
@@ -9390,6 +9478,9 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s5_segHeight = (uint8_t)getInt("s5segH", c.s5_segHeight);
   c.s5_fill     = getFloat("s5fill", c.s5_fill);
   c.s5_showPeaks = getBool("s5peaks");
+  c.s5_barBrightness = (uint8_t)getInt("s5barBrightness", c.s5_barBrightness);
+  c.s5_peakBrightness = (uint8_t)getInt("s5peakBrightness", c.s5_peakBrightness);
+  c.s5_smoothness = (uint8_t)getInt("s5smooth", c.s5_smoothness);
 
   // Styl 6
   c.s6_width    = (uint8_t)getInt("s6w", c.s6_width);
@@ -9399,6 +9490,9 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s6_segMin   = (uint8_t)getInt("s6min", c.s6_segMin);
   c.s6_segMax   = (uint8_t)getInt("s6max", c.s6_segMax);
   c.s6_showPeaks = getBool("s6peaks");
+  c.s6_barBrightness = (uint8_t)getInt("s6barBrightness", c.s6_barBrightness);
+  c.s6_peakBrightness = (uint8_t)getInt("s6peakBrightness", c.s6_peakBrightness);
+  c.s6_smoothness = (uint8_t)getInt("s6smooth", c.s6_smoothness);
 
   // Styl 7 (Okrągły)
   c.s7_circleRadius = (uint8_t)getInt("s7radius", c.s7_circleRadius);
@@ -9421,9 +9515,30 @@ server.on("/analyzerApply", HTTP_POST, [](AsyncWebServerRequest *request){
   c.s9_filled = getBool("s9filled");
   c.s9_centerSize = (uint8_t)getInt("s9center", c.s9_centerSize);
   c.s9_smoothness = (uint8_t)getInt("s9smooth", c.s9_smoothness);
+
+  // Styl 10 (Floating Peaks - Ulatujące szczyty)
+  c.s10_barWidth = (uint8_t)getInt("s10barw", c.s10_barWidth);
+  c.s10_barGap = (uint8_t)getInt("s10gap", c.s10_barGap);
+  c.s10_segmentHeight = (uint8_t)getInt("s10segh", c.s10_segmentHeight);
+  c.s10_segmentGap = (uint8_t)getInt("s10segg", c.s10_segmentGap);
+  c.s10_maxPeaks = (uint8_t)getInt("s10maxp", c.s10_maxPeaks);
+  c.s10_peakHoldTime = (uint8_t)getInt("s10hold", c.s10_peakHoldTime);
+  c.s10_peakFloatSpeed = (uint8_t)getInt("s10speed", c.s10_peakFloatSpeed);
+  c.s10_peakFadeSteps = (uint8_t)getInt("s10fade", c.s10_peakFadeSteps);
+  c.s10_trailLength = (uint8_t)getInt("s10trail", c.s10_trailLength);
+  c.s10_showTrails = getBool("s10trails");
+  c.s10_smoothness = (uint8_t)getInt("s10smooth", c.s10_smoothness);
+  c.s10_barBrightness = (uint8_t)getInt("s10barbr", c.s10_barBrightness);
+  c.s10_peakBrightness = (uint8_t)getInt("s10peakbr", c.s10_peakBrightness);
+  c.s10_trailBrightness = (uint8_t)getInt("s10trailbr", c.s10_trailBrightness);
+  c.s10_peakMinHeight = (uint8_t)getInt("s10minh", c.s10_peakMinHeight);
+  c.s10_floatHeight = (uint8_t)getInt("s10floath", c.s10_floatHeight);
+  c.s10_enableAnimation = getBool("s10anim");
   
   // Globalne ustawienia
+  uint16_t oldPeakHold = c.peakHoldTimeMs;
   c.peakHoldTimeMs = (uint16_t)getInt("peakHoldMs", c.peakHoldTimeMs);
+  Serial.printf("DEBUG WEB: Analyzer apply - peakHoldMs: %u -> %u\n", oldPeakHold, c.peakHoldTimeMs);
 
   analyzerSetStyle(c);
   request->send(200, "text/plain", "OK");
@@ -9634,13 +9749,8 @@ void loop()
     
     // Nie nadpisuj EQ16 menu
     if (!EQ16_isMenuActive()) {
-      Serial.printf("DEBUG: Calling displayRadio() - EQ16 not active (eq16MenuActive=%s)\n", 
-                    eq16MenuActive ? "true" : "false");
       displayRadio();
       u8g2.sendBuffer();
-    } else {
-      Serial.printf("DEBUG: Skipping displayRadio() - EQ16 menu is active (eq16MenuActive=%s)\n", 
-                    eq16MenuActive ? "true" : "false");
     }
     currentSelection = station_nr - 1; // Przywracamy zaznaczenie obecnie grajacej stacji
   }
@@ -9910,7 +10020,7 @@ void loop()
           } 
           else 
           {  // Jeśli osiągnięto wartość 0, przejdź do najwyższej wartości
-            if (currentSelection = maxSelection())
+            if (currentSelection == maxSelection())
             {
             firstVisibleLine = currentSelection - maxVisibleLines + 1;  // Ustaw pierwszą widoczną linię na najwyższą
             }
@@ -10222,37 +10332,56 @@ void loop()
       }
     }
 
-    // Wyłącz VU meter gdy EQ16 menu jest aktywne
-    if (vuMeterOn && !EQ16_isMenuActive())
+    // Obsługa VU meter i analizatora
+    if (vuMeterOn)
     { 
-      // Style 0, 3, 4 tylko gdy nie mute
-      if (volumeMute == false) {
-        if (displayMode == 0) {vuMeterMode0();}
-        if (displayMode == 3) {vuMeterMode3();}
-        if (displayMode == 4) 
-        {
-          vuMeterMode4(); 
-          if (debugAudioBuffor)
+      // Gdy EQ16 menu jest aktywne, pokaż tylko menu
+      if (EQ16_isMenuActive()) {
+        // EQ16 menu zawsze pokazuje analizator + interface
+        if (displayMode >= 5 && displayMode <= 10) {
+          // Uruchom analizator dla wizualizacji EQ
+          if (displayMode == 5) {vuMeterMode5();}
+          if (displayMode == 6) {vuMeterMode6();}
+          if (displayMode == 7) {vuMeterMode7();}
+          if (displayMode == 8) {vuMeterMode8();}
+          if (displayMode == 9) {vuMeterMode9();}
+          if (displayMode == 10) {vuMeterMode10();}
+        }
+        // Analizator musi działać dla EQ16
+        eq_analyzer_set_runtime_active(true);
+      } else {
+        // Normalny tryb - pełna obsługa VU meter
+        
+        // Style 0, 3, 4 tylko gdy nie mute
+        if (volumeMute == false) {
+          if (displayMode == 0) {vuMeterMode0();}
+          if (displayMode == 3) {vuMeterMode3();}
+          if (displayMode == 4) 
           {
-            for (int i = 0; i < 10; i++) 
+            vuMeterMode4(); 
+            if (debugAudioBuffor)
             {
-              int y = 1 + (9 - i) * 6; 
-              if (audioBufferTime > i) { u8g2.drawBox(126, y, 8, 5);} else {u8g2.drawFrame(126, y, 8, 5);}
+              for (int i = 0; i < 10; i++) 
+              {
+                int y = 1 + (9 - i) * 6; 
+                if (audioBufferTime > i) { u8g2.drawBox(126, y, 8, 5);} else {u8g2.drawFrame(126, y, 8, 5);}
+              }
             }
           }
         }
-      }
-      
-      // Style 5-9 zawsze (również podczas mute dla animacji)
-      if (displayMode == 5) {vuMeterMode5();}
-      if (displayMode == 6) {vuMeterMode6();}
-      if (displayMode == 7) {vuMeterMode7();}  // Nowy styl: Okrągły
-      if (displayMode == 8) {vuMeterMode8();}  // Nowy styl: Liniowy
-      if (displayMode == 9) {vuMeterMode9();}  // Nowy styl: Spadające gwiazdki jak śnieg
         
-      // Powiedz analizatorowi, że ma spać gdy style 5-9 nie są aktywne
-      if (displayMode < 5 || displayMode > 9) {
-        eq_analyzer_set_runtime_active(false);
+        // Style 5-10 zawsze (również podczas mute dla animacji)
+        if (displayMode == 5) {vuMeterMode5();}
+        if (displayMode == 6) {vuMeterMode6();}
+        if (displayMode == 7) {vuMeterMode7();}  // Nowy styl: Okrągły
+        if (displayMode == 8) {vuMeterMode8();}  // Nowy styl: Liniowy
+        if (displayMode == 9) {vuMeterMode9();}  // Nowy styl: Spadające gwiazdki jak śnieg
+        if (displayMode == 10) {vuMeterMode10();} // Nowy styl: Floating Peaks - Ulatujące szczyty
+          
+        // Powiedz analizatorowi, że ma spać gdy style 5-10 nie są aktywne
+        if (displayMode < 5 || displayMode > 10) {
+          eq_analyzer_set_runtime_active(false);
+        }
       }
     }
     else if (displayMode == 0) {showIP(1,47);} //y = vuRy
@@ -10287,6 +10416,39 @@ void loop()
     if (!EQ16_isMenuActive()) {
       displayRadioScroller();  // wykonujemy przewijanie tekstu station stringi przygotowujemy bufor ekranu
       u8g2.sendBuffer();  // rysujemy całą zawartosc ekranu.
+    }
+    
+    // Serial Commands for CPU monitoring
+    if (Serial.available()) {
+      String command = Serial.readStringUntil('\n');
+      command.trim();
+      if (command == "cpu start" || command == "cpu on") {
+        startCpuMonitoring();
+        Serial.println("CPU monitoring started");
+      } 
+      else if (command == "cpu stop" || command == "cpu off") {
+        stopCpuMonitoring();
+        Serial.println("CPU monitoring stopped");
+      }
+      else if (command == "cpu status") {
+        if (cpuMonitorTask != NULL) {
+          Serial.println("CPU monitoring: ACTIVE");
+        } else {
+          Serial.println("CPU monitoring: INACTIVE");
+        }
+      }
+      else if (command == "mem" || command == "memory") {
+        Serial.printf("Free Heap: %d bytes | Free PSRAM: %d bytes\n", 
+                      ESP.getFreeHeap(), ESP.getFreePsram());
+      }
+      else if (command == "help" || command == "?") {
+        Serial.println("=== CPU Monitor Commands ===");
+        Serial.println("cpu start  - Start CPU monitoring");
+        Serial.println("cpu stop   - Stop CPU monitoring"); 
+        Serial.println("cpu status - Check monitoring status");
+        Serial.println("mem        - Show memory usage");
+        Serial.println("help       - Show this help");
+      }
     }
     
     //if (f_callInfo) {f_callInfo = false; displayBasicInfo();}  

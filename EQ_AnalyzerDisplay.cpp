@@ -6,12 +6,20 @@
 #include <time.h>
 #include <math.h>
 
+// Storage definitions - same as in main.cpp
+#ifdef USE_SD
+  #include "SD.h"
+  #define STORAGE SD
+#else
+  #include "SPIFFS.h"
+  #define STORAGE SPIFFS
+#endif
+
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
 
-// Function to get storage from main.cpp
-extern fs::FS& getStorage();
+// External variables from main.cpp
 extern String stationName;
 extern String stationNameStream;
 extern String stationStringWeb;
@@ -19,9 +27,9 @@ extern uint8_t volumeValue;
 extern bool volumeMute;
 extern U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2;
 
-// EQ variables - defined locally since they are simple arrays
-extern uint8_t eqLevel[EQ_BANDS];
-extern uint8_t eqPeak[EQ_BANDS];
+// EQ variables - defined here instead of extern
+uint8_t eqLevel[EQ_BANDS] = {0};
+uint8_t eqPeak[EQ_BANDS] = {0};
 
 // Zmienne globalne dla konfiguracji stylów
 bool eqAnalyzerEnabled = true;
@@ -55,6 +63,55 @@ uint32_t eq_analyzer_get_sample_count() {
   return millis() / 10; // Prosty licznik
 }
 
+// ======================= ZOPTYMALIZOWANE POBIERANIE POZIOMÓW =======================
+
+// Buforowane poziomy dla UI (thread-safe, bez obliczeń FFT)
+static float g_ui_levels[EQ_BANDS] = {0};
+static float g_ui_peaks[EQ_BANDS] = {0};  
+static uint32_t g_last_ui_fetch = 0;
+static const uint32_t g_ui_fetch_interval = 25; // min. 25ms między fetch'ami (40Hz max)
+
+// Thread-safe pobieranie gotowych poziomów z analizatora FFT
+void eq_ui_fetch_levels() {
+  uint32_t now = millis();
+  if((now - g_last_ui_fetch) < g_ui_fetch_interval) {
+    return; // Zbyt wcześnie na fetch
+  }
+  g_last_ui_fetch = now;
+  
+  // Pobierz gotowe poziomy z FFT analizatora (bez obliczeń!)
+  eq_get_analyzer_levels(g_ui_levels);
+  eq_get_analyzer_peaks(g_ui_peaks);
+}
+
+// Bezpieczne pobranie poziomów dla UI (bez mutex - kopia z buforowanych)
+void eq_ui_get_levels(float out_levels[EQ_BANDS]) {
+  memcpy(out_levels, g_ui_levels, sizeof(float) * EQ_BANDS);
+}
+
+void eq_ui_get_peaks(float out_peaks[EQ_BANDS]) {
+  memcpy(out_peaks, g_ui_peaks, sizeof(float) * EQ_BANDS);  
+}
+
+// Konwersja float (0.0-1.0) do uint8_t (0-255) dla kompatybilności
+void eq_ui_get_levels_uint8(uint8_t out_levels[EQ_BANDS]) {
+  for(uint8_t i = 0; i < EQ_BANDS; i++) {
+    float val = g_ui_levels[i];
+    if(val < 0.0f) val = 0.0f;
+    if(val > 1.0f) val = 1.0f;
+    out_levels[i] = (uint8_t)(val * 255.0f);
+  }
+}
+
+void eq_ui_get_peaks_uint8(uint8_t out_peaks[EQ_BANDS]) {
+  for(uint8_t i = 0; i < EQ_BANDS; i++) {
+    float val = g_ui_peaks[i];
+    if(val < 0.0f) val = 0.0f;
+    if(val > 1.0f) val = 1.0f;
+    out_peaks[i] = (uint8_t)(val * 255.0f);
+  }
+}
+
 static const char* kCfgPath = "/analyzer.cfg";
 static AnalyzerStyleCfg g_cfg;
 
@@ -69,6 +126,30 @@ static float clampF(float v, float lo, float hi) {
   return v;
 }
 
+// Funkcje pomocnicze do obsługi jasności - ordered dithering (Bayer 4x4)
+static const uint8_t bayerMatrix4x4[4][4] = {
+  {  0, 128,  32, 160},
+  {192,  64, 224,  96},
+  { 48, 176,  16, 144},
+  {240, 112, 208,  80}
+};
+
+static bool shouldDrawBarPixel(uint8_t brightness, uint16_t x, uint16_t y) {
+  if (brightness >= 255) return true;
+  if (brightness == 0) return false;
+  // Ordered dithering z matrycą Bayera 4x4 - równomierny wzór bez skośnych linii
+  uint8_t threshold = bayerMatrix4x4[y & 3][x & 3];
+  return brightness > threshold;
+}
+
+static bool shouldDrawPeakPixel(uint8_t brightness, uint16_t x, uint16_t y) {
+  if (brightness >= 255) return true;
+  if (brightness == 0) return false;
+  // Ordered dithering z matrycą Bayera 4x4
+  uint8_t threshold = bayerMatrix4x4[y & 3][x & 3];
+  return brightness > threshold;
+}
+
 AnalyzerStyleCfg analyzerGetStyle() { return g_cfg; }
 
 uint32_t analyzerGetPeakHoldTime() {
@@ -79,8 +160,8 @@ void analyzerSetStyle(const AnalyzerStyleCfg& in)
 {
   AnalyzerStyleCfg c = in;
 
-  // Globalne ustawienia
-  c.peakHoldTimeMs = (c.peakHoldTimeMs < 50) ? 50 : (c.peakHoldTimeMs > 2000) ? 2000 : c.peakHoldTimeMs;
+  // Globalne ustawienia - pozwalamy na szybkie wartości (10-2000ms)
+  c.peakHoldTimeMs = (c.peakHoldTimeMs < 10) ? 10 : (c.peakHoldTimeMs > 2000) ? 2000 : c.peakHoldTimeMs;
 
   // Styl 5
   c.s5_barWidth = clampU8(c.s5_barWidth, 2, 30);
@@ -88,6 +169,7 @@ void analyzerSetStyle(const AnalyzerStyleCfg& in)
   c.s5_segments = clampU8(c.s5_segments,  4, 48);
   c.s5_fill     = clampF(c.s5_fill,     0.10f, 1.00f);
   c.s5_segHeight = clampU8(c.s5_segHeight, 1, 4);
+  c.s5_smoothness = clampU8(c.s5_smoothness, 10, 90);
 
   // Styl 6
   c.s6_gap    = clampU8(c.s6_gap,    0, 10);
@@ -96,6 +178,7 @@ void analyzerSetStyle(const AnalyzerStyleCfg& in)
   c.s6_segMin = clampU8(c.s6_segMin, 4, 48);
   c.s6_segMax = clampU8(c.s6_segMax, 4, 48);
   if (c.s6_segMax < c.s6_segMin) c.s6_segMax = c.s6_segMin;
+  c.s6_smoothness = clampU8(c.s6_smoothness, 10, 90);
 
   // Styl 7
   c.s7_circleRadius = clampU8(c.s7_circleRadius, 1, 8);
@@ -114,6 +197,23 @@ void analyzerSetStyle(const AnalyzerStyleCfg& in)
   c.s9_spikeLength = clampU8(c.s9_spikeLength, 2, 10);
   c.s9_centerSize = clampU8(c.s9_centerSize, 2, 8);
   c.s9_smoothness = clampU8(c.s9_smoothness, 10, 90);
+
+  // Styl 10 - Floating Peaks
+  c.s10_barWidth = clampU8(c.s10_barWidth, 4, 20);
+  c.s10_barGap = clampU8(c.s10_barGap, 1, 6);
+  c.s10_segmentHeight = clampU8(c.s10_segmentHeight, 1, 4);
+  c.s10_segmentGap = clampU8(c.s10_segmentGap, 0, 3);
+  c.s10_maxPeaks = clampU8(c.s10_maxPeaks, 1, 5);
+  c.s10_peakHoldTime = clampU8(c.s10_peakHoldTime, 0, 100);
+  c.s10_peakFloatSpeed = clampU8(c.s10_peakFloatSpeed, 3, 15);
+  c.s10_peakFadeSteps = clampU8(c.s10_peakFadeSteps, 5, 20);
+  c.s10_trailLength = clampU8(c.s10_trailLength, 3, 12);
+  c.s10_smoothness = clampU8(c.s10_smoothness, 10, 90);
+  c.s10_barBrightness = clampU8(c.s10_barBrightness, 50, 255);
+  c.s10_peakBrightness = clampU8(c.s10_peakBrightness, 100, 255);
+  c.s10_trailBrightness = clampU8(c.s10_trailBrightness, 80, 255);
+  c.s10_peakMinHeight = clampU8(c.s10_peakMinHeight, 1, 8);
+  c.s10_floatHeight = clampU8(c.s10_floatHeight, 8, 25);
 
   g_cfg = c;
 
@@ -141,7 +241,7 @@ void analyzerStyleLoad()
   g_cfg = AnalyzerStyleCfg();
   eq6_maxSegments = g_cfg.s6_segMax;
 
-  File f = getStorage().open(kCfgPath, FILE_READ);
+  File f = STORAGE.open(kCfgPath, FILE_READ);
   if (!f) return;
 
   AnalyzerStyleCfg c = g_cfg;
@@ -164,6 +264,9 @@ void analyzerStyleLoad()
     else if (k == "s5fill") c.s5_fill     = v.toFloat();
     else if (k == "s5segH") c.s5_segHeight = (uint8_t)v.toInt();
     else if (k == "s5peaks") c.s5_showPeaks = v.toInt() != 0;
+    else if (k == "s5smooth") c.s5_smoothness = (uint8_t)v.toInt();
+    else if (k == "s5barBrightness") c.s5_barBrightness = (uint8_t)v.toInt();
+    else if (k == "s5peakBrightness") c.s5_peakBrightness = (uint8_t)v.toInt();
 
     // Styl 6
     else if (k == "s6w")    c.s6_width    = (uint8_t)v.toInt();
@@ -173,6 +276,9 @@ void analyzerStyleLoad()
     else if (k == "s6min")  c.s6_segMin   = (uint8_t)v.toInt();
     else if (k == "s6max")  c.s6_segMax   = (uint8_t)v.toInt();
     else if (k == "s6peaks") c.s6_showPeaks = v.toInt() != 0;
+    else if (k == "s6smooth") c.s6_smoothness = (uint8_t)v.toInt();
+    else if (k == "s6barBrightness") c.s6_barBrightness = (uint8_t)v.toInt();
+    else if (k == "s6peakBrightness") c.s6_peakBrightness = (uint8_t)v.toInt();
 
     // Styl 7
     else if (k == "s7radius") c.s7_circleRadius = (uint8_t)v.toInt();
@@ -195,6 +301,25 @@ void analyzerStyleLoad()
     else if (k == "s9filled") c.s9_filled = v.toInt() != 0;
     else if (k == "s9center") c.s9_centerSize = (uint8_t)v.toInt();
     else if (k == "s9smooth") c.s9_smoothness = (uint8_t)v.toInt();
+
+    // Styl 10 - Floating Peaks
+    else if (k == "s10barw")     c.s10_barWidth = (uint8_t)v.toInt();
+    else if (k == "s10gap")      c.s10_barGap = (uint8_t)v.toInt();
+    else if (k == "s10segh")     c.s10_segmentHeight = (uint8_t)v.toInt();
+    else if (k == "s10segg")     c.s10_segmentGap = (uint8_t)v.toInt();
+    else if (k == "s10maxp")     c.s10_maxPeaks = (uint8_t)v.toInt();
+    else if (k == "s10hold")     c.s10_peakHoldTime = (uint16_t)v.toInt();
+    else if (k == "s10speed")    c.s10_peakFloatSpeed = (uint8_t)v.toInt();
+    else if (k == "s10fade")     c.s10_peakFadeSteps = (uint8_t)v.toInt();
+    else if (k == "s10trail")    c.s10_trailLength = (uint8_t)v.toInt();
+    else if (k == "s10trails")   c.s10_showTrails = v.toInt() != 0;
+    else if (k == "s10smooth")   c.s10_smoothness = (uint8_t)v.toInt();
+    else if (k == "s10barbr")    c.s10_barBrightness = (uint8_t)v.toInt();
+    else if (k == "s10peakbr")   c.s10_peakBrightness = (uint8_t)v.toInt();
+    else if (k == "s10trailbr")  c.s10_trailBrightness = (uint8_t)v.toInt();
+    else if (k == "s10minh")     c.s10_peakMinHeight = (uint8_t)v.toInt();
+    else if (k == "s10floath")   c.s10_floatHeight = (uint8_t)v.toInt();
+    else if (k == "s10anim")     c.s10_enableAnimation = v.toInt() != 0;
   }
   f.close();
 
@@ -203,7 +328,7 @@ void analyzerStyleLoad()
 
 void analyzerStyleSave()
 {
-  File f = getStorage().open(kCfgPath, FILE_WRITE);
+  File f = STORAGE.open(kCfgPath, FILE_WRITE);
   if (!f) return;
 
   f.println("# Analyzer style cfg");
@@ -216,6 +341,9 @@ void analyzerStyleSave()
   f.printf("s5fill=%.3f\n", g_cfg.s5_fill);
   f.printf("s5segH=%u\n", g_cfg.s5_segHeight);
   f.printf("s5peaks=%u\n", g_cfg.s5_showPeaks ? 1 : 0);
+  f.printf("s5smooth=%u\n", g_cfg.s5_smoothness);
+  f.printf("s5barBrightness=%u\n", g_cfg.s5_barBrightness);
+  f.printf("s5peakBrightness=%u\n", g_cfg.s5_peakBrightness);
 
   f.println("# Style6");
   f.printf("s6w=%u\n", g_cfg.s6_width);
@@ -225,6 +353,9 @@ void analyzerStyleSave()
   f.printf("s6min=%u\n", g_cfg.s6_segMin);
   f.printf("s6max=%u\n", g_cfg.s6_segMax);
   f.printf("s6peaks=%u\n", g_cfg.s6_showPeaks ? 1 : 0);
+  f.printf("s6smooth=%u\n", g_cfg.s6_smoothness);
+  f.printf("s6barBrightness=%u\n", g_cfg.s6_barBrightness);
+  f.printf("s6peakBrightness=%u\n", g_cfg.s6_peakBrightness);
 
   f.println("# Style7");
   f.printf("s7radius=%u\n", g_cfg.s7_circleRadius);
@@ -247,6 +378,25 @@ void analyzerStyleSave()
   f.printf("s9filled=%u\n", g_cfg.s9_filled ? 1 : 0);
   f.printf("s9center=%u\n", g_cfg.s9_centerSize);
   f.printf("s9smooth=%u\n", g_cfg.s9_smoothness);
+
+  // Styl 10 - Floating Peaks
+  f.printf("s10barw=%u\n", g_cfg.s10_barWidth);
+  f.printf("s10gap=%u\n", g_cfg.s10_barGap);
+  f.printf("s10segh=%u\n", g_cfg.s10_segmentHeight);
+  f.printf("s10segg=%u\n", g_cfg.s10_segmentGap);
+  f.printf("s10maxp=%u\n", g_cfg.s10_maxPeaks);
+  f.printf("s10hold=%u\n", g_cfg.s10_peakHoldTime);
+  f.printf("s10speed=%u\n", g_cfg.s10_peakFloatSpeed);
+  f.printf("s10fade=%u\n", g_cfg.s10_peakFadeSteps);
+  f.printf("s10trail=%u\n", g_cfg.s10_trailLength);
+  f.printf("s10trails=%u\n", g_cfg.s10_showTrails ? 1 : 0);
+  f.printf("s10smooth=%u\n", g_cfg.s10_smoothness);
+  f.printf("s10barbr=%u\n", g_cfg.s10_barBrightness);
+  f.printf("s10peakbr=%u\n", g_cfg.s10_peakBrightness);
+  f.printf("s10trailbr=%u\n", g_cfg.s10_trailBrightness);
+  f.printf("s10minh=%u\n", g_cfg.s10_peakMinHeight);
+  f.printf("s10floath=%u\n", g_cfg.s10_floatHeight);
+  f.printf("s10anim=%u\n", g_cfg.s10_enableAnimation ? 1 : 0);
   
   f.close();
 }
@@ -264,6 +414,7 @@ String analyzerStyleToJson()
   s += "\"s5_segments\":" + String(g_cfg.s5_segments) + ",";
   s += "\"s5_fill\":"     + String(g_cfg.s5_fill, 3) + ",";
   s += "\"s5_showPeaks\":" + String(g_cfg.s5_showPeaks ? "true" : "false") + ",";
+  s += "\"s5_smoothness\":" + String(g_cfg.s5_smoothness) + ",";
 
   // Styl 6
   s += "\"s6_gap\":"      + String(g_cfg.s6_gap) + ",";
@@ -272,6 +423,7 @@ String analyzerStyleToJson()
   s += "\"s6_segMin\":"   + String(g_cfg.s6_segMin) + ",";
   s += "\"s6_segMax\":"   + String(g_cfg.s6_segMax) + ",";
   s += "\"s6_showPeaks\":" + String(g_cfg.s6_showPeaks ? "true" : "false") + ",";
+  s += "\"s6_smoothness\":" + String(g_cfg.s6_smoothness) + ",";
 
   // Styl 7
   s += "\"s7_circleRadius\":" + String(g_cfg.s7_circleRadius) + ",";
@@ -325,7 +477,7 @@ String analyzerBuildHtmlPage()
   s += "<p>Tu regulujesz WYGLĄD słupków. Same słupki ruszą dopiero, gdy w /config zaznaczysz <b>FFT analyzer</b>.</p>";
 
   s += "<div class='box'><h3>Ustawienia globalne</h3>";
-  s += "<div class='row'><label>Peak hold time (ms)</label><input name='peakHoldMs' type='number' min='50' max='2000' step='50' value='" + String(g_cfg.peakHoldTimeMs) + "'></div>";
+  s += "<div class='row'><label>Peak hold time (ms)</label><input name='peakHoldMs' type='number' min='10' max='2000' step='10' value='" + String(g_cfg.peakHoldTimeMs) + "'></div>";
   s += "</div>";
 
   // Presety na górze
@@ -335,6 +487,7 @@ String analyzerBuildHtmlPage()
   s += "<form method='POST' action='/analyzerPreset' class='preset-form'><button name='preset' value='1' type='submit'>Nowoczesny</button></form>";
   s += "<form method='POST' action='/analyzerPreset' class='preset-form'><button name='preset' value='2' type='submit'>Kompaktowy</button></form>";
   s += "<form method='POST' action='/analyzerPreset' class='preset-form'><button name='preset' value='3' type='submit'>Retro</button></form>";
+  s += "<form method='POST' action='/analyzerPreset' class='preset-form'><button name='preset' value='4' type='submit'>Floating Peaks</button></form>";
   s += "</div></div>";
 
   s += "<form method='POST'>";
@@ -346,6 +499,9 @@ String analyzerBuildHtmlPage()
   s += "<div class='row'><label>segment height</label><input name='s5segH' type='number' min='1' max='4' value='" + String(g_cfg.s5_segHeight) + "'></div>";
   s += "<div class='row'><label>fill (0.1..1)</label><input step='0.05' name='s5fill' type='number' min='0.1' max='1.0' value='" + String(g_cfg.s5_fill,2) + "'></div>";
   s += "<div class='row'><label>show peaks</label><input name='s5peaks' type='checkbox' value='1' " + String(g_cfg.s5_showPeaks ? "checked" : "") + "></div>";
+  s += "<div class='row'><label>smoothness</label><input name='s5smooth' type='number' min='10' max='90' value='" + String(g_cfg.s5_smoothness) + "'></div>";
+  s += "<div class='row'><label>bar brightness</label><input name='s5barBrightness' type='number' min='0' max='255' value='" + String(g_cfg.s5_barBrightness) + "'></div>";
+  s += "<div class='row'><label>peak brightness</label><input name='s5peakBrightness' type='number' min='0' max='255' value='" + String(g_cfg.s5_peakBrightness) + "'></div>";
   s += "</div>";
 
   s += "<div class='box'><h3>Styl 6 (Cienkie kreski)</h3>";
@@ -356,6 +512,9 @@ String analyzerBuildHtmlPage()
   s += "<div class='row'><label>seg min</label><input name='s6min' type='number' min='4' max='48' value='" + String(g_cfg.s6_segMin) + "'></div>";
   s += "<div class='row'><label>seg max</label><input name='s6max' type='number' min='4' max='48' value='" + String(g_cfg.s6_segMax) + "'></div>";
   s += "<div class='row'><label>show peaks</label><input name='s6peaks' type='checkbox' value='1' " + String(g_cfg.s6_showPeaks ? "checked" : "") + "></div>";
+  s += "<div class='row'><label>smoothness</label><input name='s6smooth' type='number' min='10' max='90' value='" + String(g_cfg.s6_smoothness) + "'></div>";
+  s += "<div class='row'><label>bar brightness</label><input name='s6barBrightness' type='number' min='0' max='255' value='" + String(g_cfg.s6_barBrightness) + "'></div>";
+  s += "<div class='row'><label>peak brightness</label><input name='s6peakBrightness' type='number' min='0' max='255' value='" + String(g_cfg.s6_peakBrightness) + "'></div>";
   s += "</div>";
 
   s += "<div class='box'><h3>Styl 7 (Okrągły)</h3>";
@@ -381,6 +540,18 @@ String analyzerBuildHtmlPage()
   s += "<div class='row'><label>filled centers</label><input name='s9filled' type='checkbox' value='1' " + String(g_cfg.s9_filled ? "checked" : "") + "></div>";
   s += "<div class='row'><label>min star size</label><input name='s9center' type='number' min='2' max='8' value='" + String(g_cfg.s9_centerSize) + "'></div>";
   s += "<div class='row'><label>smoothness</label><input name='s9smooth' type='number' min='10' max='90' value='" + String(g_cfg.s9_smoothness) + "'></div>";
+  s += "</div>";
+
+  s += "<div class='box'><h3>Styl 10 (Floating Peaks - Ulatujące szczyty)</h3>";
+  s += "<p style='font-size:11px;color:#888'>Bazuje na Styl 5 + szczyty odlatują w górę</p>";
+  s += "<div class='row'><label>bar width (px)</label><input name='s10barw' type='number' min='4' max='20' value='" + String(g_cfg.s10_barWidth) + "'></div>";
+  s += "<div class='row'><label>bar gap (px)</label><input name='s10gap' type='number' min='1' max='6' value='" + String(g_cfg.s10_barGap) + "'></div>";
+  s += "<div class='row'><label>segment height (px)</label><input name='s10segh' type='number' min='1' max='4' value='" + String(g_cfg.s10_segmentHeight) + "'></div>";
+  s += "<div class='row'><label>segment gap (px)</label><input name='s10segg' type='number' min='0' max='3' value='" + String(g_cfg.s10_segmentGap) + "'></div>";
+  s += "<div class='row'><label>max flying peaks</label><input name='s10maxp' type='number' min='1' max='5' value='" + String(g_cfg.s10_maxPeaks) + "'></div>";
+  s += "<div class='row'><label>smoothness</label><input name='s10smooth' type='number' min='10' max='90' value='" + String(g_cfg.s10_smoothness) + "'></div>";
+  s += "<div class='row'><label>peak hold time (frames)</label><input name='s10hold' type='number' min='0' max='100' value='" + String(g_cfg.s10_peakHoldTime) + "'></div>";
+  s += "<div class='row'><label>float speed (px/frame)</label><input name='s10speed' type='number' min='1' max='15' value='" + String(g_cfg.s10_peakFloatSpeed) + "'></div>";
   s += "</div>";
 
   s += "<div class='row'>";
@@ -485,7 +656,7 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
   static uint32_t lastDebugDisplay = 0;
   uint32_t now = millis();
   if (now - lastDebugDisplay > 2000) {
-    Serial.print("Display levels: ");
+    // Serial.print("Display levels: "); // Debug disabled
     for (int i = 0; i < EQ_BANDS; i++) {
       Serial.print(levels[i], 2);
       if (i < EQ_BANDS - 1) Serial.print(" ");
@@ -494,9 +665,14 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
     lastDebugDisplay = now;
   }
 
-  // Przepisujemy do eqLevel/eqPeak w skali 0..100 dla rysowania słupków
+  // Przepisujemy do eqLevel/eqPeak w skali 0..100 dla rysowania słupków z wygładzaniem
   // Jeśli mute - animacja opadania słupków
   static uint8_t muteLevel[EQ_BANDS] = {0}; // Zapamietane poziomy dla animacji mute
+  static float smoothedLevel[EQ_BANDS] = {0.0f}; // Wygładzone poziomy dla smoothness
+  
+  // Współczynnik wygładzania z s5_smoothness (10-90) -> odwrotnie (0.9-0.1)
+  // Mniejsza wartość = więcej wygładzania, większa = mniej wygładzania
+  float smoothFactor = (100.0f - g_cfg.s5_smoothness) / 100.0f;
   
   for (uint8_t i = 0; i < EQ_BANDS; i++)
   {
@@ -509,6 +685,7 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
       }
       eqLevel[i] = muteLevel[i];
       eqPeak[i] = 0; // Peak natychmiast znika
+      smoothedLevel[i] = 0.0f; // Reset wygładzania podczas mute
     } else {
       float lv = levels[i];
       float pk = peaks[i];
@@ -517,9 +694,20 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
       if (pk < 0.0f) pk = 0.0f;
       if (pk > 1.0f) pk = 1.0f;
 
-      uint8_t newLevel = (uint8_t)(lv * 100.0f + 0.5f);
+      // Wygładzanie poziomów: smoothFactor 0.0-1.0, gdzie 0=max smoothness, 1=no smoothness
+      if (lv > smoothedLevel[i]) {
+        // Attack - szybsze wchodzenie (mniej wygładzania)
+        float attackSpeed = 0.3f + smoothFactor * 0.7f; // 0.3-1.0
+        smoothedLevel[i] = smoothedLevel[i] + attackSpeed * (lv - smoothedLevel[i]);
+      } else {
+        // Release - wolniejsze opadanie (więcej wygładzania)
+        float releaseSpeed = 0.1f + smoothFactor * 0.6f; // 0.1-0.7
+        smoothedLevel[i] = smoothedLevel[i] + releaseSpeed * (lv - smoothedLevel[i]);
+      }
+
+      uint8_t newLevel = (uint8_t)(smoothedLevel[i] * 100.0f + 0.5f);
       eqLevel[i] = newLevel;
-      eqPeak[i] = (uint8_t)(pk * 100.0f + 0.5f);
+      eqPeak[i] = (uint8_t)(pk * 100.0f + 0.5f); // Peak bez wygładzania dla responsywności
       muteLevel[i] = newLevel; // Zapamietaj poziom dla animacji mute
     }
   }
@@ -657,7 +845,19 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
       if (segBottom > eqBottomY) segBottom = eqBottomY;
       
       if (segTop <= segBottom) {
-        u8g2.drawBox(x, segTop, barWidth, segmentHeight);  // Wszystkie segmenty mają identyczną wysokość
+        // Rysuj segment z uwzględnieniem jasności słupków
+        if (g_cfg.s5_barBrightness >= 255) {
+          u8g2.drawBox(x, segTop, barWidth, segmentHeight);
+        } else if (g_cfg.s5_barBrightness > 0) {
+          // Rysuj pixel po pixelu z uwzględnieniem jasności
+          for (int16_t px = 0; px < barWidth; px++) {
+            for (int16_t py = 0; py < segmentHeight; py++) {
+              if (shouldDrawBarPixel(g_cfg.s5_barBrightness, x + px, segTop + py)) {
+                u8g2.drawPixel(x + px, segTop + py);
+              }
+            }
+          }
+        }
       }
     }
 
@@ -669,7 +869,17 @@ void vuMeterMode5() // Tryb 5: 16 słupków – dynamiczny analizator z zegarem 
       int16_t peakY = peakSegBottom - segmentHeight + 1 - 2; // 2 piksele nad segmentem
       if (peakY >= eqTopY && peakY <= eqBottomY)
       {
-        u8g2.drawBox(x, peakY, barWidth, 1);
+        // Rysuj peak z uwzględnieniem jasności szczytów
+        if (g_cfg.s5_peakBrightness >= 255) {
+          u8g2.drawBox(x, peakY, barWidth, 1);
+        } else if (g_cfg.s5_peakBrightness > 0) {
+          // Rysuj pixel po pixelu z uwzględnieniem jasności
+          for (int16_t px = 0; px < barWidth; px++) {
+            if (shouldDrawPeakPixel(g_cfg.s5_peakBrightness, x + px, peakY)) {
+              u8g2.drawPixel(x + px, peakY);
+            }
+          }
+        }
       }
     }
   }
@@ -735,8 +945,13 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
   eq_get_analyzer_levels(levels);
   eq_get_analyzer_peaks(peaks);
 
-  // Konwersja poziomów - jeśli mute to animacja opadania słupków
+  // Konwersja poziomów z wygładzaniem - jeśli mute to animacja opadania słupków
   static uint8_t muteLevel6[EQ_BANDS] = {0}; // Zapamietane poziomy dla animacji mute
+  static float smoothedLevel6[EQ_BANDS] = {0.0f}; // Wygładzone poziomy dla smoothness
+  
+  // Współczynnik wygładzania z s6_smoothness (10-90) -> odwrotnie (0.9-0.1)
+  // Mniejsza wartość = więcej wygładzania, większa = mniej wygładzania
+  float smoothFactor6 = (100.0f - g_cfg.s6_smoothness) / 100.0f;
   
   for (uint8_t i = 0; i < EQ_BANDS && i < EQ_BANDS; i++)
   {
@@ -749,6 +964,7 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
       }
       eqLevel[i] = muteLevel6[i];
       eqPeak[i] = 0; // Peak natychmiast znika
+      smoothedLevel6[i] = 0.0f; // Reset wygładzania podczas mute
     } else {
       float lv = levels[i];
       float pk = peaks[i];
@@ -757,9 +973,20 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
       if (pk < 0.0f) pk = 0.0f;
       if (pk > 1.0f) pk = 1.0f;
 
-      uint8_t newLevel = (uint8_t)(lv * 100.0f + 0.5f);
+      // Wygładzanie poziomów: smoothFactor6 0.0-1.0, gdzie 0=max smoothness, 1=no smoothness
+      if (lv > smoothedLevel6[i]) {
+        // Attack - szybsze wchodzenie (mniej wygładzania)
+        float attackSpeed = 0.3f + smoothFactor6 * 0.7f; // 0.3-1.0
+        smoothedLevel6[i] = smoothedLevel6[i] + attackSpeed * (lv - smoothedLevel6[i]);
+      } else {
+        // Release - wolniejsze opadanie (więcej wygładzania)
+        float releaseSpeed = 0.1f + smoothFactor6 * 0.6f; // 0.1-0.7
+        smoothedLevel6[i] = smoothedLevel6[i] + releaseSpeed * (lv - smoothedLevel6[i]);
+      }
+
+      uint8_t newLevel = (uint8_t)(smoothedLevel6[i] * 100.0f + 0.5f);
       eqLevel[i] = newLevel;
-      eqPeak[i] = (uint8_t)(pk * 100.0f + 0.5f);
+      eqPeak[i] = (uint8_t)(pk * 100.0f + 0.5f); // Peak bez wygładzania dla responsywności
       muteLevel6[i] = newLevel; // Zapamietaj poziom dla animacji mute
     }
   }
@@ -786,8 +1013,7 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
 
     uint8_t iconX = 256 - 40;  // SCREEN_WIDTH = 256
     uint8_t maxStationWidth = 0;
-    if (iconX > xStation + 4)
-      maxStationWidth = iconX - xStation - 4;
+    if (iconX > xStation + 4) maxStationWidth = iconX - xStation - 4;
 
     if (maxStationWidth > 0)
     {
@@ -844,7 +1070,6 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
   const uint8_t eqTopY      = 14;
   const uint8_t eqBottomY   = 64 - 1;  // SCREEN_HEIGHT = 64
   const uint8_t eqMaxHeight = eqBottomY - eqTopY + 1;
-
   const uint8_t maxSegments = eq6_maxSegments;
 
   // Auto-dopasowanie do pełnej szerokości ekranu
@@ -886,10 +1111,23 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
       if (segBottom < segTop) segBottom = segTop;
       
       if (segTop <= segBottom) {
-        u8g2.drawBox(x, segTop, barWidth, segmentHeight);  // Wszystkie segmenty mają identyczną wysokość
+        // Rysuj segment z uwzględnieniem jasności słupków
+        if (g_cfg.s6_barBrightness >= 255) {
+          u8g2.drawBox(x, segTop, barWidth, segmentHeight);
+        } else if (g_cfg.s6_barBrightness > 0) {
+          // Rysuj pixel po pixelu z uwzględnieniem jasności
+          for (int16_t px = 0; px < barWidth; px++) {
+            for (int16_t py = 0; py < segmentHeight; py++) {
+              if (shouldDrawBarPixel(g_cfg.s6_barBrightness, x + px, segTop + py)) {
+                u8g2.drawPixel(x + px, segTop + py);
+              }
+            }
+          }
+        }
       }
     }
 
+    // Peak – pojedyncza kreska nad słupkiem
     if (peakSeg > 0)
     {
       uint8_t ps = peakSeg - 1;
@@ -897,7 +1135,17 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
       int16_t peakY = peakSegBottom - segmentHeight + 1 - 2; // 2 piksele nad segmentem
       
       if (peakY >= eqTopY && peakY <= eqBottomY) {
-        u8g2.drawBox(x, peakY, barWidth, 1);  // 1 piksel wysokości peak - cienka kreska
+        // Rysuj peak z uwzględnieniem jasności szczytów
+        if (g_cfg.s6_peakBrightness >= 255) {
+          u8g2.drawBox(x, peakY, barWidth, 1);
+        } else if (g_cfg.s6_peakBrightness > 0) {
+          // Rysuj pixel po pixelu z uwzględnieniem jasności
+          for (int16_t px = 0; px < barWidth; px++) {
+            if (shouldDrawPeakPixel(g_cfg.s6_peakBrightness, x + px, peakY)) {
+              u8g2.drawPixel(x + px, peakY);
+            }
+          }
+        }
       }
     }
   }
@@ -908,7 +1156,7 @@ void vuMeterMode6() // Tryb 6: 16 słupków z cienkich „kreseczek" + peak, pe�
 // NOWE STYLE ANALIZATORA 7 i 8  
 // 
 
-void vuMeterMode7() // Styl 7: Okr�g�y analizator
+void vuMeterMode7() // Styl 7: Okrągły analizator
 {
   if (!eqAnalyzerEnabled) {
     u8g2.clearBuffer();
@@ -930,7 +1178,7 @@ void vuMeterMode7() // Styl 7: Okr�g�y analizator
 
   u8g2.clearBuffer();
   
-  // Okr�g�y analizator
+  // Okrągły analizator
   int centerX = 128;
   int centerY = 32;
   
@@ -1103,9 +1351,239 @@ void vuMeterMode9() // Styl 9: Spadające gwiazdki jak śnieg
   
   u8g2.sendBuffer();
 }
-// 
-// FUNKCJE ZARZ�DZANIA PRESETAMI
-// 
+
+void vuMeterMode10() // Styl 10: Floating Peaks - szczytowe ulatują w górę (bazuje na Styl 5)
+{
+  eq_analyzer_set_runtime_active(true);
+  
+  if (!eqAnalyzerEnabled) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.setCursor(10, 24);
+    u8g2.print("ANALYZER OFF");
+    u8g2.setCursor(10, 40);
+    u8g2.print("Enable in Web UI");
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // 1. Pobranie poziomów z analizatora FFT (0..1) - tak samo jak w Styl 5
+  float levels[EQ_BANDS];
+  float peaks[EQ_BANDS];
+  eq_get_analyzer_levels(levels);
+  eq_get_analyzer_peaks(peaks);
+
+  // Wygładzanie - tak samo jak w Styl 5
+  static uint8_t muteLevel[EQ_BANDS] = {0};
+  static float smoothedLevel[EQ_BANDS] = {0.0f};
+  float smoothFactor = (100.0f - g_cfg.s10_smoothness) / 100.0f;
+  
+  for (uint8_t i = 0; i < EQ_BANDS; i++) {
+    if (volumeMute) {
+      if (muteLevel[i] > 2) muteLevel[i] -= 2;
+      else muteLevel[i] = 0;
+      eqLevel[i] = muteLevel[i];
+      eqPeak[i] = 0;
+      smoothedLevel[i] = 0.0f;
+    } else {
+      float lv = levels[i];
+      float pk = peaks[i];
+      if (lv < 0.0f) lv = 0.0f;
+      if (lv > 1.0f) lv = 1.0f;
+      if (pk < 0.0f) pk = 0.0f;
+      if (pk > 1.0f) pk = 1.0f;
+
+      if (lv > smoothedLevel[i]) {
+        float attackSpeed = 0.3f + smoothFactor * 0.7f;
+        smoothedLevel[i] = smoothedLevel[i] + attackSpeed * (lv - smoothedLevel[i]);
+      } else {
+        float releaseSpeed = 0.1f + smoothFactor * 0.6f;
+        smoothedLevel[i] = smoothedLevel[i] + releaseSpeed * (lv - smoothedLevel[i]);
+      }
+
+      uint8_t newLevel = (uint8_t)(smoothedLevel[i] * 100.0f + 0.5f);
+      eqLevel[i] = newLevel;
+      eqPeak[i] = (uint8_t)(pk * 100.0f + 0.5f);
+      muteLevel[i] = newLevel;
+    }
+  }
+
+  u8g2.setDrawColor(1);
+  u8g2.clearBuffer();
+
+  // Pasek górny: zegar, stacja, głośnik - tak samo jak Styl 5
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 5)) {
+    char timeString[9];
+    if (timeinfo.tm_sec % 2 == 0)
+      snprintf(timeString, sizeof(timeString), "%2d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    else
+      snprintf(timeString, sizeof(timeString), "%2d %02d", timeinfo.tm_hour, timeinfo.tm_min);
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.setCursor(4, 11);
+    u8g2.print(timeString);
+
+    uint8_t timeWidth = u8g2.getStrWidth(timeString);
+    uint8_t xStation  = 4 + timeWidth + 6;
+    uint8_t iconX = 256 - 40;
+    uint8_t maxStationWidth = 0;
+    if (iconX > xStation + 4) maxStationWidth = iconX - xStation - 4;
+
+    if (maxStationWidth > 0) {
+      String nameToShow = stationName;
+      if (nameToShow.length() == 0) {
+        if (stationNameStream.length() > 0) nameToShow = stationNameStream;
+        else if (stationStringWeb.length() > 0) nameToShow = stationStringWeb;
+        else nameToShow = "Radio";
+      }
+      while (nameToShow.length() > 0 && u8g2.getStrWidth(nameToShow.c_str()) > maxStationWidth) {
+        nameToShow.remove(nameToShow.length() - 1);
+      }
+      u8g2.setCursor(xStation, 11);
+      u8g2.print(nameToShow);
+    }
+  }
+
+  // Ikona głośnika
+  uint8_t iconY = 2;
+  uint8_t iconX = 256 - 40;
+  u8g2.drawBox(iconX, iconY + 2, 4, 7);
+  u8g2.drawLine(iconX + 4, iconY + 2, iconX + 7, iconY);
+  u8g2.drawLine(iconX + 4, iconY + 8, iconX + 7, iconY + 10);
+  u8g2.drawLine(iconX + 7, iconY,     iconX + 7, iconY + 10);
+  if (volumeMute) {
+    u8g2.drawLine(iconX - 1, iconY, iconX + 11, iconY + 12);
+    u8g2.drawLine(iconX - 1, iconY + 12, iconX + 11, iconY);
+  } else {
+    u8g2.drawPixel(iconX + 9,  iconY + 3);
+    u8g2.drawPixel(iconX + 10, iconY + 5);
+    u8g2.drawPixel(iconX + 9,  iconY + 7);
+  }
+  u8g2.setFont(u8g2_font_5x8_mr);
+  u8g2.setCursor(iconX + 14, 10);
+  if (volumeMute) u8g2.print("MUTED");
+  else u8g2.print(volumeValue);
+  u8g2.drawHLine(0, 13, 256);
+
+  // Obszar słupków
+  const uint8_t eqTopY      = 14;
+  const uint8_t eqBottomY   = 64 - 1;
+  const uint8_t maxSegments = 32;
+  
+  // Parametry słupków - używamy s10_barWidth i s10_barGap
+  const uint8_t barWidth = g_cfg.s10_barWidth;
+  const uint8_t barGap   = g_cfg.s10_barGap;
+  const uint16_t totalBarsWidth = EQ_BANDS * barWidth + (EQ_BANDS - 1) * barGap;
+  int16_t startX = (256 - totalBarsWidth) / 2;
+  if (startX < 2) startX = 2;
+
+  // Floating peaks - WIELE peaków na słupek (konfigurowalny limit)
+  static const uint8_t MAX_PEAKS_ARRAY = 5;  // Rozmiar tablicy (stały)
+  uint8_t maxPeaksActive = g_cfg.s10_maxPeaks; // Limit aktywnych peaków (konfigurowalny)
+  struct FlyingPeak {
+    float y;
+    uint8_t holdCounter;
+    bool active;
+  };
+  static FlyingPeak flyingPeaks[EQ_BANDS][MAX_PEAKS_ARRAY] = {};
+  static uint8_t lastPeakSeg[EQ_BANDS] = {0};     // ostatni segment peak (do wykrycia nowego szczytu)
+  static bool wasRising[EQ_BANDS] = {false};      // czy słupek rósł w poprzedniej klatce
+
+  uint8_t segmentGap = g_cfg.s10_segmentGap;
+  uint8_t segmentHeight = g_cfg.s10_segmentHeight;
+
+  for (uint8_t i = 0; i < EQ_BANDS; i++) {
+    uint8_t levelPercent = eqLevel[i];
+    uint8_t peakPercent  = eqPeak[i];
+    
+    uint8_t segments = (levelPercent * maxSegments) / 100;
+    if (segments > maxSegments) segments = maxSegments;
+
+    uint8_t peakSeg = (peakPercent * maxSegments) / 100;
+    if (peakSeg > maxSegments) peakSeg = maxSegments;
+
+    int16_t x = startX + i * (barWidth + barGap);
+
+    // Rysowanie słupków (segmenty) - pełna jasność
+    for (uint8_t s = 0; s < segments; s++) {
+      int16_t segBottom = eqBottomY - (s * (segmentHeight + segmentGap));
+      int16_t segTop = segBottom - segmentHeight + 1;
+      if (segTop < eqTopY) segTop = eqTopY;
+      if (segBottom > eqBottomY) segBottom = eqBottomY;
+      if (segTop <= segBottom) {
+        u8g2.drawBox(x, segTop, barWidth, segmentHeight);
+      }
+    }
+
+    // === FLOATING PEAKS - wiele peaków latających ===
+    // Oblicz pozycję Y dla aktualnego szczytu słupka (góra słupka)
+    int16_t barTopY = eqBottomY; // domyślnie na dole jeśli brak segmentów
+    if (segments > 0) {
+      int16_t topSegBottom = eqBottomY - ((segments - 1) * (segmentHeight + segmentGap));
+      barTopY = topSegBottom - segmentHeight + 1;
+      if (barTopY < eqTopY) barTopY = eqTopY;
+    }
+    
+    // Oblicz pozycję Y dla aktualnego peak (używane do wystrzeliwania)
+    int16_t currentPeakY = eqBottomY;
+    if (peakSeg > 0) {
+      uint8_t ps = peakSeg - 1;
+      int16_t peakSegBottom = eqBottomY - (ps * (segmentHeight + segmentGap));
+      currentPeakY = peakSegBottom - segmentHeight + 1 - 2;
+      if (currentPeakY < eqTopY) currentPeakY = eqTopY;
+    }
+
+    // Wykryj NOWY szczyt - gdy peak rósł i teraz zaczyna spadać
+    bool isRising = (peakSeg > lastPeakSeg[i]);
+    bool justPeaked = (wasRising[i] && !isRising && peakSeg > 0);
+    
+    // Wystrzel nowy floating peak gdy słupek osiągnął szczyt i zaczyna opadać
+    if (justPeaked) {
+      // Znajdź wolny slot (tylko do limitu maxPeaksActive)
+      for (uint8_t p = 0; p < maxPeaksActive; p++) {
+        if (!flyingPeaks[i][p].active) {
+          flyingPeaks[i][p].y = (float)currentPeakY;
+          flyingPeaks[i][p].holdCounter = g_cfg.s10_peakHoldTime;
+          flyingPeaks[i][p].active = true;
+          break;
+        }
+      }
+    }
+    
+    wasRising[i] = isRising;
+    lastPeakSeg[i] = peakSeg;
+
+    // Aktualizuj i rysuj wszystkie aktywne floating peaks
+    for (uint8_t p = 0; p < MAX_PEAKS_ARRAY; p++) {
+      if (flyingPeaks[i][p].active) {
+        // Hold time - peak czeka na miejscu
+        if (flyingPeaks[i][p].holdCounter > 0) {
+          flyingPeaks[i][p].holdCounter--;
+        } else {
+          // Peak odlatuje w górę
+          flyingPeaks[i][p].y -= (float)g_cfg.s10_peakFloatSpeed * 0.5f;
+        }
+        
+        // Rysuj peak TYLKO jeśli jest POWYŻEJ szczytu słupka (nie nakłada się na słupek)
+        int16_t peakY = (int16_t)flyingPeaks[i][p].y;
+        if (peakY < barTopY && peakY >= eqTopY) {
+          // Peak jest powyżej słupka - rysuj
+          u8g2.drawBox(x, peakY, barWidth, 1);
+        } else if (peakY < eqTopY) {
+          // Peak wyleciał poza ekran - dezaktywuj
+          flyingPeaks[i][p].active = false;
+        }
+        // Jeśli peak jest w obszarze słupka (peakY >= barTopY) - nie rysuj, ale nie dezaktywuj
+        // Peak będzie widoczny gdy słupek opadnie
+      }
+    }
+  }
+  
+  u8g2.sendBuffer();
+}
+//
+// FUNKCJE ZARZĄDZANIA PRESETAMI
+//
 
 void analyzerApplyPreset(uint8_t presetId) {
   switch(presetId) {
@@ -1113,10 +1591,16 @@ void analyzerApplyPreset(uint8_t presetId) {
     case 1: analyzerPresetModern(); break;
     case 2: analyzerPresetCompact(); break;
     case 3: analyzerPresetRetro(); break;
-    default: break; // 4 = Custom - no changes
+    case 4: analyzerPresetFloatingPeaks(); break;
+    default: break; // 5 = Custom - no changes
   }
+  
+  Serial.printf("DEBUG: Applied preset %d - peakHoldTimeMs=%d\n", presetId, g_cfg.peakHoldTimeMs);
+  
   // Apply settings immediately
   analyzerSetStyle(g_cfg);
+  
+  Serial.printf("DEBUG: After validation - peakHoldTimeMs=%d\n", g_cfg.peakHoldTimeMs);
 }
 
 void analyzerSetStyleMode(uint8_t styleMode) {
@@ -1126,11 +1610,11 @@ void analyzerSetStyleMode(uint8_t styleMode) {
 }
 
 uint8_t analyzerGetMaxDisplayMode() {
-  return 9;
+  return 10;
 }
 
 bool analyzerIsStyleAvailable(uint8_t style) {
-  return (style >= 0 && style <= 9);
+  return (style >= 0 && style <= 10);
 }
 
 uint8_t analyzerGetAvailableStylesMode() {
@@ -1138,17 +1622,24 @@ uint8_t analyzerGetAvailableStylesMode() {
 }
 
 void analyzerPresetClassic() {
-  g_cfg.peakHoldTimeMs = 200;
+  Serial.printf("DEBUG: Setting Classic preset - peakHoldTimeMs = 40\n");
+  g_cfg.peakHoldTimeMs = 40;  // 5x szybciej
   g_cfg.s5_barWidth = 8;
   g_cfg.s5_barGap = 2;
   g_cfg.s5_segments = 32;
   g_cfg.s5_fill = 0.7f;
   g_cfg.s5_showPeaks = true;
+  g_cfg.s5_smoothness = 50;  // Średnie wygładzanie
+  g_cfg.s5_barBrightness = 220;  // Lekko ściemnione słupki
+  g_cfg.s5_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s6_gap = 1;
   g_cfg.s6_fill = 0.6f;
   g_cfg.s6_segMax = 40;
   g_cfg.s6_showPeaks = true;
+  g_cfg.s6_smoothness = 40;  // Średnie wygładzanie
+  g_cfg.s6_barBrightness = 220;  // Lekko ściemnione słupki
+  g_cfg.s6_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s7_circleRadius = 3;
   g_cfg.s7_circleGap = 2;
@@ -1167,21 +1658,27 @@ void analyzerPresetClassic() {
   g_cfg.s9_showSpikes = true;
   g_cfg.s9_filled = true;
   g_cfg.s9_centerSize = 3;
-  g_cfg.s9_smoothness = 40;
+  g_cfg.s9_smoothness = 8;  // 5x szybciej
 }
 
 void analyzerPresetModern() {
-  g_cfg.peakHoldTimeMs = 300;
+  g_cfg.peakHoldTimeMs = 60;  // 5x szybciej
   g_cfg.s5_barWidth = 12;
   g_cfg.s5_barGap = 4;
   g_cfg.s5_segments = 48;
   g_cfg.s5_fill = 0.8f;
   g_cfg.s5_showPeaks = true;
+  g_cfg.s5_smoothness = 30;  // Szybsze dla Modern
+  g_cfg.s5_barBrightness = 200;  // Ściemnione słupki
+  g_cfg.s5_peakBrightness = 255; // Rozjaśnione szczyty
   
   g_cfg.s6_gap = 2;
   g_cfg.s6_fill = 0.7f;
   g_cfg.s6_segMax = 48;
   g_cfg.s6_showPeaks = true;
+  g_cfg.s6_smoothness = 25;  // Szybsze dla Modern
+  g_cfg.s6_barBrightness = 200;  // Ściemnione słupki
+  g_cfg.s6_peakBrightness = 255; // Rozjaśnione szczyty
   
   g_cfg.s7_circleRadius = 4;
   g_cfg.s7_circleGap = 3;
@@ -1200,21 +1697,27 @@ void analyzerPresetModern() {
   g_cfg.s9_showSpikes = true;
   g_cfg.s9_filled = true;
   g_cfg.s9_centerSize = 5;
-  g_cfg.s9_smoothness = 20;
+  g_cfg.s9_smoothness = 4;  // 5x szybciej
 }
 
 void analyzerPresetCompact() {
-  g_cfg.peakHoldTimeMs = 150;
+  g_cfg.peakHoldTimeMs = 30;  // 5x szybciej
   g_cfg.s5_barWidth = 6;
   g_cfg.s5_barGap = 1;
   g_cfg.s5_segments = 24;
   g_cfg.s5_fill = 0.5f;
   g_cfg.s5_showPeaks = false;
+  g_cfg.s5_smoothness = 60;  // Wolniejsze dla Compact (oszczędność mocy)
+  g_cfg.s5_barBrightness = 180;  // Mocno ściemnione słupki
+  g_cfg.s5_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s6_gap = 0;
   g_cfg.s6_fill = 0.5f;
   g_cfg.s6_segMax = 32;
   g_cfg.s6_showPeaks = false;
+  g_cfg.s6_smoothness = 55;  // Wolniejsze dla Compact
+  g_cfg.s6_barBrightness = 180;  // Mocno ściemnione słupki
+  g_cfg.s6_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s7_circleRadius = 2;
   g_cfg.s7_circleGap = 1;
@@ -1233,21 +1736,27 @@ void analyzerPresetCompact() {
   g_cfg.s9_showSpikes = false;
   g_cfg.s9_filled = false;
   g_cfg.s9_centerSize = 2;
-  g_cfg.s9_smoothness = 60;
+  g_cfg.s9_smoothness = 12; // 5x szybciej
 }
 
 void analyzerPresetRetro() {
-  g_cfg.peakHoldTimeMs = 400;
+  g_cfg.peakHoldTimeMs = 80;  // 5x szybciej
   g_cfg.s5_barWidth = 10;
   g_cfg.s5_barGap = 6;
   g_cfg.s5_segments = 28;
   g_cfg.s5_fill = 0.6f;
   g_cfg.s5_showPeaks = true;
+  g_cfg.s5_smoothness = 70;  // Bardzo wolno dla Retro (klassyczny wygląd)
+  g_cfg.s5_barBrightness = 240;  // Lekko przyciemnione słupki
+  g_cfg.s5_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s6_gap = 3;
   g_cfg.s6_fill = 0.6f;
   g_cfg.s6_segMax = 36;
   g_cfg.s6_showPeaks = true;
+  g_cfg.s6_smoothness = 65;  // Bardzo wolno dla Retro
+  g_cfg.s6_barBrightness = 240;  // Lekko przyciemnione słupki
+  g_cfg.s6_peakBrightness = 255; // Pełna jasność szczytów
   
   g_cfg.s7_circleRadius = 3;
   g_cfg.s7_circleGap = 4;
@@ -1266,5 +1775,44 @@ void analyzerPresetRetro() {
   g_cfg.s9_showSpikes = true;
   g_cfg.s9_filled = false;
   g_cfg.s9_centerSize = 4;
-  g_cfg.s9_smoothness = 50;
+  g_cfg.s9_smoothness = 10; // 5x szybciej
+}
+
+void analyzerPresetFloatingPeaks() {
+  Serial.printf("DEBUG: Setting Floating Peaks preset - peakHoldTimeMs = 25\n");
+  g_cfg.peakHoldTimeMs = 25;  // 8x szybciej dla animacji
+  
+  // Optymalizacje dla wszystkich stylów
+  g_cfg.s5_barWidth = 10;
+  g_cfg.s5_barGap = 3;
+  g_cfg.s5_segments = 30;
+  g_cfg.s5_fill = 0.6f;
+  g_cfg.s5_showPeaks = true;
+  g_cfg.s5_smoothness = 35; // Szybkie wygładzanie
+  g_cfg.s5_barBrightness = 180; // Ściemnione słupki
+  g_cfg.s5_peakBrightness = 255; // Rozjaśnione szczyty
+  
+  g_cfg.s6_gap = 2;
+  g_cfg.s6_fill = 0.65f;
+  g_cfg.s6_segMax = 35;
+  g_cfg.s6_showPeaks = true;
+  g_cfg.s6_smoothness = 30;
+  g_cfg.s6_barBrightness = 180;
+  g_cfg.s6_peakBrightness = 255;
+  
+  // Styl 10 - Floating Peaks - główne ustawienia
+  g_cfg.s10_barWidth = 12;
+  g_cfg.s10_barGap = 2;
+  g_cfg.s10_peakHoldTime = 8; // Czas zatrzymania (krótki)
+  g_cfg.s10_peakFloatSpeed = 8; // Prędkość ulatywania
+  g_cfg.s10_peakFadeSteps = 12; // Kroki zanikania
+  g_cfg.s10_trailLength = 6; // Długość śladu
+  g_cfg.s10_showTrails = true;
+  g_cfg.s10_smoothness = 30; // Szybkie wygładzanie
+  g_cfg.s10_barBrightness = 180; // Ściemnione słupki
+  g_cfg.s10_peakBrightness = 255; // Rozjaśnione szczyty
+  g_cfg.s10_trailBrightness = 190; // Widoczny ślad ale nie przesłaniający
+  g_cfg.s10_peakMinHeight = 3;
+  g_cfg.s10_floatHeight = 15;
+  g_cfg.s10_enableAnimation = true;
 }
