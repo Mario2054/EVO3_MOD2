@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel='icon' href='/favicon.ico' type='image/x-icon'>
+<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+<link rel="apple-touch-icon" sizes="180x180" href="/icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evo Web Radio - Radiobrowser API</title>
+<style>
+  html {font-family: Arial; display: inline-block; text-align: center;}
+  h2 {font-size: 1.3rem;}
+  p {font-size: 0.95rem;}
+  body {max-width: 1380px; margin:0 auto; padding-bottom: 25px; background: #D0D0D0;}
+  .button { background-color: #4CAF50; border: 1px solid black; color: white; padding: 6px 12px; border-radius: 5px; cursor:pointer;margin: 0 1.5px;}
+  .button:hover {background-color: #4a4a4a;}
+  .column { display: flex; justify-content: center; gap:5px; flex-wrap: wrap; padding: 5px;}
+  select, input {padding:6px; border-radius:4px; border:1px solid gray; width: 120px;}
+  input[type="text"], input[type="number"] {width: 150px;}
+  .results {display: flex; flex-direction: column; align-items: center; gap:8px; margin-top: 10px;}
+  .station {display: flex; align-items: center; background: #f0f0f0; border: 1px solid #aaa; border-radius: 6px; padding: 6px; width: 95%; max-width: 950px;}
+  .station:hover {background: #e0e0e0;}
+  .favicon {width: 64px; height: 64px; flex-shrink: 0; border-radius: 6px; overflow: hidden; display: flex; align-items:center; justify-content:center; background:#ccc; margin-right:10px;}
+  .favicon img {width:100%; height:100%; object-fit:cover;}
+  .meta {flex:1; text-align:left; word-break: break-word; min-width:0;}
+  .meta h3 {margin:0; font-size:1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+  .info-line {font-size:0.85rem; margin:2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+  .tags-line {font-size:0.8rem; margin:2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: calc(100% - 120px);}
+  .stream-link {font-size:0.8rem; color:#333; text-decoration:underline; display:block; max-width: calc(100% - 120px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+  .controls {display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; align-items:center;}
+  audio {margin-top: 15px; width: 90%;}
+  .multiselect {position: relative; display: inline-block;}
+  .selectBox {border:1px solid gray; border-radius:4px; padding:6px; cursor:pointer; width:120px; background:#fff;}
+  .checkBoxes{display:none;border:1px solid #aaa;position:absolute;background:#fff;z-index:1;width:120px;max-height:220px;overflow-y:auto;margin-top:1px;border-radius:1px;font-size:0.8rem;} 
+  .checkBoxes label{display:flex;align-items:center;white-space:nowrap;padding:2px 6px;cursor:pointer;line-height:1.1;} 
+  .checkBoxes input[type="checkbox"]{appearance:none;width:13px;height:13px;border:1px solid #444;border-radius:2px;margin-right:5px;position:relative;top:-1px;} 
+  .checkBoxes input[type="checkbox"]:checked{background-color:#4CAF50;} 
+  .checkBoxes label:first-child{font-weight:bold;} 
+  .checkBoxes label:hover{background:#f0f0f0;}
+</style>
+</head>
+<body>
+<h2> Evo Web Radio - Radiobrowser
+  <span style="font-size:0.8rem; font-weight:normal; color:#333;">rev. 1.8</span>
+</h2>
+<p style="font-size: 0.8rem; margin-top:-6px;"><a href="/">Go Back</a></p>
+<span>Host: <p id="hostInfo" style="font-size:0.85rem; color:#222; width: 120px;align-items: center; background:#fff; border:1px solid #aaa; display:inline-block; padding:6px 10px; border-radius:6px;"><b>detecting...</b></p></span>
+
+
+<div class="column">
+  <select id="countrySelect"><option value="">- Country -</option></select>
+  <select id="stateSelect"><option value="">-- Region --</option></select>
+  <input type="text" id="tagInput" list="tagList" placeholder="- Music Type -">
+  <datalist id="tagList"></datalist>
+  <input type="number" id="bitrateInput" placeholder="Min. bitrate (kbps)" min="0" step="32">
+
+  <div class="multiselect">
+    <div class="selectBox" onclick="toggleCheckboxes()">- Codec -</div>
+    <div id="checkBoxes" class="checkBoxes"></div>
+  </div>
+
+  <input type="text" id="nameInput" placeholder="- Station Name -">
+  <button id="searchBtn" class="button">Search</button>
+</div>
+
+<p id="status">Select criteria and click Search Button.</p>
+
+<div id="results" class="results"></div>
+<div id="playerArea"></div>
+
+<script>
+const API = "https://de1.api.radio-browser.info/json";
+const countrySelect = document.getElementById("countrySelect");
+const stateSelect = document.getElementById("stateSelect");
+const tagInput = document.getElementById("tagInput");
+const tagList = document.getElementById("tagList");
+const nameInput = document.getElementById("nameInput");
+const bitrateInput = document.getElementById("bitrateInput");
+const searchBtn = document.getElementById("searchBtn");
+const resultsDiv = document.getElementById("results");
+const statusP = document.getElementById("status");
+const playerArea = document.getElementById("playerArea");
+
+const hostInfo = document.getElementById("hostInfo");
+const currentHost = window.location.hostname || "localhost";
+hostInfo.innerHTML = `<b>${currentHost}</b>`;
+
+const checkBoxes = document.getElementById("checkBoxes");
+const codecOptions = ["MP3","AAC","FLAC","OGG","Opus","WMA","WAV","AIFF"];
+const selectAllLabel = document.createElement("label");
+const selectAllCb = document.createElement("input");
+selectAllCb.type="checkbox";
+selectAllCb.addEventListener("change",()=>{ 
+  checkBoxes.querySelectorAll('input[type="checkbox"]:not([data-select-all])').forEach(cb=>cb.checked=selectAllCb.checked); 
+});
+selectAllCb.dataset.selectAll="1";
+selectAllLabel.appendChild(selectAllCb);
+selectAllLabel.style.fontWeight = "bold";
+selectAllLabel.appendChild(document.createTextNode(" Select All"));
+checkBoxes.appendChild(selectAllLabel);
+
+codecOptions.forEach(codec=>{
+  const label = document.createElement("label");
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.value = codec;
+  label.appendChild(cb);
+  label.appendChild(document.createTextNode(" "+codec));
+  checkBoxes.appendChild(label);
+});
+
+function toggleCheckboxes() {
+  checkBoxes.style.display = checkBoxes.style.display === "block" ? "none" : "block";
+}
+function getSelectedCodecs() {
+  return Array.from(checkBoxes.querySelectorAll("input:checked:not([data-select-all])")).map(cb=>cb.value);
+}
+
+async function loadCountries() {
+  const res = await fetch(`${API}/countries`);
+  const data = await res.json();
+  data.sort((a,b)=>a.name.localeCompare(b.name));
+  for (const c of data) {
+    const opt = document.createElement("option");
+    opt.value = c.name;
+    opt.textContent = c.name;
+    countrySelect.appendChild(opt);
+  }
+}
+
+async function loadStates(country) {
+  stateSelect.innerHTML = `<option value="">-- Region --</option>`;
+  if (!country) return;
+  const res = await fetch(`${API}/states/${encodeURIComponent(country)}`);
+  const data = await res.json();
+  data.sort((a,b)=>a.name.localeCompare(b.name));
+  for (const s of data) {
+    const opt = document.createElement("option");
+    opt.value = s.name;
+    opt.textContent = s.name;
+    stateSelect.appendChild(opt);
+  }
+}
+
+async function loadTags() {
+  const res = await fetch(`${API}/tags`);
+  const data = await res.json();
+  data.sort((a,b)=>a.name.localeCompare(b.name));
+  for (const t of data.slice(0, 3000)) {
+    const opt = document.createElement("option");
+    opt.value = t.name;
+    tagList.appendChild(opt);
+  }
+}
+
+// Stare kopiowanie linku działające na HTTP
+function copyLink(e, url) {
+  e.preventDefault();
+  const tempInput = document.createElement("input");
+  document.body.appendChild(tempInput);
+  tempInput.value = url;
+  tempInput.select();
+  try {
+    document.execCommand("copy");
+    e.target.textContent = "✔ Copied";
+    setTimeout(() => e.target.textContent = url, 2000);
+  } catch {
+    alert("Nie udało się skopiować linku.");
+  }
+  document.body.removeChild(tempInput);
+}
+
+async function sendToEvoPlay(url, btn) {
+  const host = window.location.hostname || "localhost";
+  const evoUrl = `http://${host}/update?url=${encodeURIComponent(url)}`;
+
+  try {
+    await fetch(evoUrl, { mode: "no-cors" });
+    const msg = document.createElement("span");
+    msg.style.color = "green";
+    msg.style.fontSize = "0.8rem";
+    msg.textContent = "✔ Done";
+    btn.after(msg);
+    setTimeout(() => msg.remove(), 2000);
+  } catch (err) {
+    alert(`Nie udało się połączyć z odtwarzaczem Evo (${evoUrl}).`);
+  }
+}
+
+async function searchStations() {
+  const country = countrySelect.value;
+  const state = stateSelect.value;
+  const tag = tagInput.value.trim();
+  const name = nameInput.value.trim();
+  const minBitrate = parseInt(bitrateInput.value) || 0;
+  const selectedCodecs = getSelectedCodecs();
+
+  statusP.textContent = "Searching...";
+  resultsDiv.innerHTML = "";
+  playerArea.innerHTML = "";
+
+  let query = `${API}/stations/search?limit=100`;
+  if (country) query += `&country=${encodeURIComponent(country)}`;
+  if (state) query += `&state=${encodeURIComponent(state)}`;
+  if (tag) query += `&tag=${encodeURIComponent(tag)}`;
+  if (name) query += `&name=${encodeURIComponent(name)}`;
+  if (minBitrate > 0) query += `&bitrate_min=${minBitrate}`;
+
+  const res = await fetch(query);
+  let data = await res.json();
+
+  if(selectedCodecs.length>0){
+    data = data.filter(st=> selectedCodecs.includes(st.codec));
+  }
+
+  if (!data.length) {
+    statusP.textContent = "No stations found.";
+    return;
+  }
+
+  statusP.textContent = `${data.length} stations found (min. ${minBitrate} kbps, codec: ${selectedCodecs.join(", ") || "any"}).`;
+
+  for (const st of data) {
+    const div = document.createElement("div");
+    div.className = "station";
+
+    const fav = document.createElement("div");
+    fav.className = "favicon";
+    const img = document.createElement("img");
+    img.src = st.favicon || "";
+    img.alt = "favicon";
+    img.onerror = () => img.src = "https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg";
+    fav.appendChild(img);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+
+    const nameEl = document.createElement("h3");
+    nameEl.textContent = st.name;
+    nameEl.title = st.name;
+    meta.appendChild(nameEl);
+
+    const infoLine = document.createElement("p");
+    infoLine.className = "info-line";
+    const infoParts = [`${st.country || ""}`, `${st.bitrate || ""} kbps`, `${st.codec || ""}`];
+    infoLine.textContent = infoParts.join(" | ");
+    infoLine.title = infoLine.textContent;
+    meta.appendChild(infoLine);
+
+    const tagsLine = document.createElement("p");
+    tagsLine.className = "tags-line";
+    tagsLine.textContent = st.tags || "";
+    tagsLine.title = st.tags || "";
+    meta.appendChild(tagsLine);
+	
+	// Stream link + mini play
+    const streamWrapper = document.createElement("div");
+    streamWrapper.style.display = "flex";
+	streamWrapper.style.alignItems = "center";
+	streamWrapper.style.justifyContent = "flex-start";
+	streamWrapper.style.gap = "6px"; // mały odstęp między linkiem a ikoną
+
+    const streamLink = document.createElement("a");
+    streamLink.className = "stream-link";
+    streamLink.textContent = st.url_resolved;
+    streamLink.href = "#";
+    streamLink.title = st.url_resolved;
+    streamLink.onclick = (e) => copyLink(e, st.url_resolved);
+    meta.appendChild(streamLink);
+
+    const miniPlay = document.createElement("span");
+	miniPlay.textContent = "▶";
+	miniPlay.title = "Play";
+	miniPlay.style.cursor = "pointer";
+	miniPlay.style.color = "#4CAF50"; // zielony jak przyciski
+	miniPlay.style.fontSize = "0.9rem";
+	miniPlay.style.userSelect = "none"; // żeby nie zaznaczało się przy klikaniu
+	miniPlay.onclick = () => playStation(st);
+	
+    streamWrapper.appendChild(streamLink);
+    streamWrapper.appendChild(miniPlay);
+    meta.appendChild(streamWrapper);
+	
+	const controls = document.createElement("div");
+    controls.className = "controls";
+	
+	const evoBtn = document.createElement("button");
+    evoBtn.className = "button";
+    evoBtn.textContent = "🎧 Play";
+    evoBtn.onclick = () => sendToEvoPlay(st.url_resolved, evoBtn);
+
+    controls.appendChild(evoBtn);
+
+    div.appendChild(fav);
+    div.appendChild(meta);
+    div.appendChild(controls);
+    resultsDiv.appendChild(div);
+  }
+}
+
+function playStation(st) {
+  playerArea.innerHTML = `
+    <h3>${st.name}</h3>
+    <audio controls autoplay src="${st.url_resolved || st.url}"></audio>
+    <p>${st.country || ""} — ${st.tags || ""}</p>
+  `;
+  window.scrollTo({top: document.body.scrollHeight, behavior:"smooth"});
+}
+
+countrySelect.addEventListener("change", () => loadStates(countrySelect.value));
+searchBtn.addEventListener("click", searchStations);
+nameInput.addEventListener("keydown", e => { if (e.key === "Enter") searchStations(); });
+tagInput.addEventListener("keydown", e => { if (e.key === "Enter") searchStations(); });
+
+loadCountries();
+loadTags();
+</script>
+
+</body>
+</html>

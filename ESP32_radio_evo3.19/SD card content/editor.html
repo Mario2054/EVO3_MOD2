@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Bank Editor - ESP Radio</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 3px;
+	  background-color: #f5f5f5;
+    }
+	 #container {
+      max-width: 1250px;
+      margin: 0 auto;
+      text-align: center;
+    }
+	
+    .station {
+      display: flex;
+      gap: 3px;
+      margin-bottom: 3px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .input-name {
+      width: 220px;
+      background-color: #f0f8ff;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 4px;
+    }
+    .input-bank {
+      width: 65px;
+      background-color: #fff5cc;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 4px;
+    }
+    .input-station {
+      width: 65px;
+      background-color: #e6ffe6;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 4px;
+    }
+    .input-url {
+      width: 650px;
+      background-color: #fefefe;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 4px;
+      font-family: monospace;
+    }
+    .remove-btn, .up-btn, .down-btn, .play-btn {
+      background-color: #ccc;
+	  border: none;
+      padding: 3px 6px;
+      border-radius: 5px;
+      cursor: pointer;
+	  background-color: #4CAF50; 
+	  color: white;
+
+    }
+    .remove-btn:hover { background-color: #e74c3c; color: white; }
+	.play-btn:hover { background-color: #E0E000; color: white; }
+    .up-btn:hover, .down-btn:hover { background-color: #4a4a4a; color: white; }
+    
+
+	
+	button {
+      padding: 3px 8px;
+      margin: 2px 2px 2px 2px;
+	  border: 1px solid #333;
+	  border-radius: 5px;
+	  background-color: #4CAF50; 
+	  color: white;
+	}  
+	button:hover {
+	background-color: #4a4a4a; 
+	color: white; 
+	}
+	
+	select {
+      padding: 4px 8px;
+      margin: 4px 4px 4px 0;
+	  border: 1px solid #333;
+	  border-radius: 5px;
+    }
+	
+	
+}
+  </style>
+</head>
+<body>
+<div id="container">
+  <h2>ESP Web Radio - Edytor Banków</h2>
+  <p style="font-size: 0.8rem;">Rev - v1.05</p>
+  <p style="font-size: 0.8rem;"><a href=https://github.com/dzikakuna/ESP32_radio_streams>https://github.com/dzikakuna/ESP32_radio_streams</a></p>
+  <br>
+  <br>
+  <label>Załaduj </label>
+  
+  <label for="bankSelect">bank:</label>
+  <select id="bankSelect">
+    <script>
+      for (let i = 1; i <= 16; i++) {
+        const num = i.toString().padStart(2, '0');
+        document.write(`<option value="bank${num}.txt">bank${num}.txt</option>`);
+      }
+    
+	// Ustaw domyślną wartość pola IP na IP hosta z przeglądarki
+	window.addEventListener('DOMContentLoaded', () => {
+    const ipInput = document.getElementById('ipInput');
+    if (ipInput && !ipInput.value) {
+      ipInput.value = window.location.hostname;
+    }
+	});  
+	
+  </script>
+  </select>
+  <input type="file" id="localFileInput" accept=".txt" style="display:none" onchange="loadFromLocalFile(event)">
+  <button onclick="document.getElementById('localFileInput').click()">📂 z Pliku</button>
+  <button onclick="loadStationsGit()">🔄 z GitHub</button>	
+  <button onclick="loadStationsEsp()">🔄 z Radia ESP</button>
+  
+ 
+	
+
+  <button onclick="saveToFile()">💾 Zapisz jako TXT</button>
+
+
+  <label>Adres IP Radia:</label>
+  <input style="width: 110px;" type="text" id="ipInput" placeholder="192.168.x.x" >
+  <button onclick="uploadEditedFile()">📤 Wyślij bank</button>
+  <br>
+
+
+  <hr>
+  <div id="stations"></div>
+</div>
+  <script>
+    const githubBase = 'https://raw.githubusercontent.com/dzikakuna/ESP32_radio_streams/main/';
+
+  function loadStationsGit() {
+  const filename = document.getElementById('bankSelect').value;
+  //const source = document.querySelector('input[name="src"]:checked').value;
+  const source = 'github'
+  const container = document.getElementById('stations');
+  container.innerHTML = '';
+
+  let url = '';
+  if (source === 'github') {
+    url = githubBase + filename;
+  } else {
+    const ip = document.getElementById('ipInput').value.trim();
+    if (!ip) return alert("Podaj adres IP radia!");
+    url = `http://${ip}/viewweb2?filename=${filename}`;
+  }
+
+  fetch(url)
+    .then(response => {
+      if (!response.ok) throw new Error(`Nie udało się załadować pliku (${response.status})`);
+      return response.text();
+    })
+    .then(data => {
+      const lines = data.trim().split('\n');
+      lines.forEach(line => {
+	if (line.trim() === '') {
+    addStation(); // pusta stacja
+	} else {
+    const name = line.slice(0, 25).trim();
+    const rest = line.slice(25).trim().split(' ');
+    const bank = (rest[0] || '') + " " + (rest[1] || '');
+    const station = (rest[2] || '') + " " + (rest[3] || '');
+    const url = rest.slice(4).join(' ') || '';
+    addStation(name, bank, station, url);
+  }
+});
+      updateStationNumbers();
+    })
+    .catch(err => {
+      alert('Błąd przy ładowaniu pliku: ' + err.message + (source === 'esp' ? '\nMożliwe, że plik nie istnieje na serwerze ESP32.' : ''));
+    });
+}
+
+function loadStationsEsp() {
+  const filename = document.getElementById('bankSelect').value;
+  //const source = document.querySelector('input[name="src"]:checked').value;
+  const source = 'esp'
+  const container = document.getElementById('stations');
+  container.innerHTML = '';
+
+  let url = '';
+  if (source === 'github') {
+    url = githubBase + filename;
+  } else {
+    const ip = document.getElementById('ipInput').value.trim();
+    if (!ip) return alert("Podaj adres IP radia!");
+    url = `http://${ip}/viewweb2?filename=${filename}`;
+  }
+
+  fetch(url)
+    .then(response => {
+      if (!response.ok) throw new Error(`Nie udało się załadować pliku (${response.status})`);
+      return response.text();
+    })
+    .then(data => {
+      const lines = data.trim().split('\n');
+      lines.forEach(line => {
+	if (line.trim() === '') {
+    addStation(); // pusta stacja
+	} else {
+    const name = line.slice(0, 25).trim();
+    const rest = line.slice(25).trim().split(' ');
+    const bank = (rest[0] || '') + " " + (rest[1] || '');
+    const station = (rest[2] || '') + " " + (rest[3] || '');
+    const url = rest.slice(4).join(' ') || '';
+    addStation(name, bank, station, url);
+  }
+});
+      updateStationNumbers();
+    })
+    .catch(err => {
+      alert('Błąd przy ładowaniu pliku: ' + err.message + (source === 'esp' ? '\nMożliwe, że plik nie istnieje na serwerze ESP32.' : ''));
+    });
+}
+
+
+function loadFromLocalFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const content = e.target.result;
+    const lines = content.trim().split('\n');
+    const container = document.getElementById('stations');
+    container.innerHTML = ''; // Wyczyść istniejące stacje
+
+    lines.forEach(line => {
+      if (line.trim() === '') {
+        addStation(); // Pusta linia = pusta stacja
+      } else {
+        const name = line.slice(0, 25).trim();
+        const rest = line.slice(25).trim().split(' ');
+        const bank = (rest[0] || '') + " " + (rest[1] || '');
+        const station = (rest[2] || '') + " " + (rest[3] || '');
+        const url = rest.slice(4).join(' ') || '';
+        addStation(name, bank, station, url);
+      }
+    });
+
+    updateStationNumbers();
+  };
+  reader.readAsText(file);
+}
+
+
+    function addStation(name = '', bank = '', station = '', url = '') {
+      const container = document.getElementById('stations');
+	  const currentCount = container.querySelectorAll('.station').length;
+	  
+	  if (currentCount >= 99) {
+		alert('Można dodać maksymalnie 99 stacji w każdym banku !');
+		return;
+	  }
+	
+	  // Automatycznie pobierz numer banku z wybranego pliku
+	  if (!bank && url.trim() !== '' ) {
+		const bankFilename = document.getElementById('bankSelect').value;
+		const match = bankFilename.match(/bank(\d{2})\.txt/);
+		if (match) {
+		  //bank = "Bank" + match[1]; // np. "03"
+		  bank = "Bank " + parseInt(match[1], 10).toString(); // np. "03" → 3 → "3"
+		}
+	  }
+	
+	if (!station) {
+		station = `Stacja ${currentCount + 1}`;
+    }
+
+  
+	   
+      const div = document.createElement('div');
+      div.className = 'station';
+
+      const nameInput = createInput(name, 'Nazwa stacji', 'input-name');
+      const bankInput = createInput(bank, 'Bank', 'input-bank');
+      const stationInput = createInput(station, 'Stacja', 'input-station');
+      const urlInput = createInput(url, 'URL', 'input-url');
+
+	  urlInput.addEventListener('input', () => {
+	  updateStationNumbers();
+	  updateBankNumbers();
+		  
+	});
+
+
+      const upBtn = document.createElement('button');
+      upBtn.className = 'up-btn';
+      //upBtn.textContent = '⬆️';
+      upBtn.textContent = '▲';
+	  upBtn.onclick = () => {
+        const prev = div.previousElementSibling;
+        if (prev) container.insertBefore(div, prev);
+        updateStationNumbers();
+      };
+
+      const downBtn = document.createElement('button');
+      downBtn.className = 'down-btn';
+      //downBtn.textContent = '⬇️';
+      downBtn.textContent = '▼';
+	  downBtn.onclick = () => {
+        const next = div.nextElementSibling;
+        if (next) container.insertBefore(next, div);
+        updateStationNumbers();
+      };
+	  
+	  
+	
+	  const playBtn = document.createElement('button');
+	  playBtn.className = 'play-btn';
+      playBtn.textContent = '▷';
+  	  //playBtn.textContent = '▶️';
+
+      playBtn.onclick = () => {
+  const ip = document.getElementById('ipInput').value.trim();
+  const url = urlInput.querySelector('input')?.value.trim();
+  if (!ip || !url) return alert("Podaj adres IP i URL stacji!");
+  
+  fetch(`http://${ip}/update?url=${encodeURIComponent(url)}`)
+    .then(() => alert('Wysłano żądanie odtworzenia stacji.'))
+    .catch(err => alert('Błąd połączenia: ' + err.message));
+};
+
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'remove-btn';
+      //removeBtn.textContent = '🗑️';
+      removeBtn.textContent = '❌';
+	  removeBtn.onclick = () => {
+        div.remove();
+        updateStationNumbers();
+      };
+
+      div.append(nameInput, bankInput, stationInput, urlInput, upBtn, downBtn, playBtn, removeBtn);
+      container.appendChild(div);
+	  updateStationNumbers();
+    }
+
+    function createInput(value, placeholder, className) {
+	  const wrapper = document.createElement('div');
+	  wrapper.style.display = 'flex';
+	  wrapper.style.alignItems = 'center';
+	  
+	  const input = document.createElement('input');
+	  input.type = 'text';
+	  input.placeholder = placeholder;
+	  input.value = value;
+	  input.className = className;
+
+	  // Dla "Nazwa stacji"
+	  if (className === 'input-name') {
+		input.maxLength = 25;
+
+		const counter = document.createElement('small');
+		counter.textContent = ` ${input.value.length} / 25`;
+		counter.style.fontSize = '0.5rem';
+		counter.style.color = '#222';
+		counter.style.minWidth = '35px';
+
+		// Aktualizuj licznik na bieżąco
+		input.addEventListener('input', () => {
+      counter.textContent = ` ${input.value.length} / 25`;
+    });
+
+    wrapper.appendChild(input);
+    wrapper.appendChild(counter);
+    return wrapper;
+  }
+
+  // Dla pozostałych pól — bez licznika
+  wrapper.appendChild(input);
+  return wrapper;
+}
+
+	
+	
+    function updateStationNumbers() {
+      const stationDivs = document.querySelectorAll('.station');
+      let counter = 1;
+
+      stationDivs.forEach(div => {
+        const inputs = div.querySelectorAll('input');
+        const url = inputs[3].value.trim();
+        const stationInput = inputs[2];
+
+        if (url !== '') {
+          stationInput.value = `Stacja ${counter}`;
+          counter++;
+        } else {
+          stationInput.value = '';
+        }
+      });
+    }
+	
+	function updateBankNumbers() {
+	 const stationDivs = document.querySelectorAll('.station');
+	  const match = document.getElementById('bankSelect').value.match(/bank(\d{2})\.txt/);
+	  if (!match) return;
+		const newBank = "Bank " + parseInt(match[1], 10).toString();
+		
+		stationDivs.forEach(div => {
+		const inputs = div.querySelectorAll('input');
+		const bankInput = inputs[1];
+		const urlInput = inputs[3];
+		if (urlInput.value.trim() !== '' && bankInput.value.trim() === '') {  // Wpisujemy wartość banku jesli URL nie jest pusty
+		  bankInput.value = newBank;
+		} 
+		
+		if (urlInput.value.trim() === '' && bankInput.value.trim() !== '') { // kasujemy zawartosc pola Bank jesli URL jest pusty
+		  bankInput.value = "";
+		} 
+		
+		
+  });
+}
+	
+	
+/*
+    
+		if (urlVal === '') {
+	bankInputField.value = '';  
+	}	
+	
+	
+	function saveToFile() {
+      const filename = document.getElementById('bankSelect').value;
+      const stationDivs = document.querySelectorAll('.station');
+      const lines = [];
+
+      stationDivs.forEach(div => {
+        const inputs = div.querySelectorAll('input');
+        const name = inputs[0].value.padEnd(25, ' ');
+        const bank = inputs[1].value.trim();
+        const station = inputs[2].value.trim();
+        const url = inputs[3].value.trim();
+        lines.push(`${name} ${bank} ${station} ${url}`);
+      });
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+    }
+*/
+	
+	/*
+	async function saveToFile() {
+	  const stationDivs = document.querySelectorAll('.station');
+	  const lines = [];
+
+  stationDivs.forEach(div => {
+    const inputs = div.querySelectorAll('input');
+    //const name = inputs[0].value.padEnd(25, ' ');
+    const name = inputs[0].value.slice(0, 25).padEnd(25, ' ');
+	const bank = inputs[1].value.trim();
+    const station = inputs[2].value.trim();
+    const url = inputs[3].value.trim();
+    lines.push(`${name}${bank} ${station} ${url}`);
+  });
+  
+  
+
+  const fileHandle = await window.showSaveFilePicker({
+    suggestedName: document.getElementById('bankSelect').value,
+    types: [
+      {
+        description: 'Pliki tekstowe',
+        accept: { 'text/plain': ['.txt'] }
+      }
+    ]
+  });
+
+  const writable = await fileHandle.createWritable();
+  await writable.write(lines.join('\n'));
+  await writable.close();
+
+  alert('Plik został zapisany.');
+}
+*/
+function saveToFile() {
+  const filename = document.getElementById('bankSelect').value;
+  const stationDivs = document.querySelectorAll('.station');
+  const lines = [];
+
+  stationDivs.forEach(div => {
+    const inputs = div.querySelectorAll('input');
+    const name = inputs[0].querySelector('input')?.value || inputs[0].value;
+    const formattedName = name.slice(0, 25).padEnd(25, ' ');
+    const bank = inputs[1].value.trim();
+    const station = inputs[2].value.trim();
+    const url = inputs[3].value.trim();
+    
+	// Dodajemy jedną lub dwie spacje zależnie od długości cyfry banku
+	let spaceBetween = ' ';
+	const bankNumber = bank.match(/\d+/);
+	
+	
+	if (bankNumber && bankNumber[0].length === 1) {
+		spaceBetween = '  '; // dwie spacje dla jednocyfrowych
+		}
+				
+   //lines.push(`${name}${bank} ${station} ${url}`);
+	lines.push(`${formattedName}${bank} ${station}${spaceBetween}${url}`);
+
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+
+
+
+    function uploadEditedFile() {
+      const ip = document.getElementById('ipInput').value.trim();
+      const filename = document.getElementById('bankSelect').value;
+      if (!ip) return alert('Podaj adres IP!');
+
+      const stationDivs = document.querySelectorAll('.station');
+      const lines = [];
+
+      stationDivs.forEach(div => {
+        const inputs = div.querySelectorAll('input');
+        //const name = inputs[0].value.padEnd(25, ' ');
+        //const name = inputs[0].value.substring(0, 25).trimEnd();
+		//const name = inputs[0].value.trim().substring(0, 24).padEnd(25, ' ');
+		const name = inputs[0].value.slice(0, 25).padEnd(25, ' ');
+		const bank = inputs[1].value.trim();
+        const station = inputs[2].value.trim();
+        const url = inputs[3].value.trim();
+        
+		// Dodajemy jedną lub dwie spacje zależnie od długości cyfry banku
+		let spaceBetween = ' ';
+		const bankNumber = bank.match(/\d+/);
+		
+		if (bankNumber && bankNumber[0].length === 1) {
+		spaceBetween = '  '; // dwie spacje dla jednocyfrowych
+		}
+				
+		//lines.push(`${name}${bank} ${station} ${url}`);
+		  lines.push(`${name}${bank} ${station}${spaceBetween}${url}`);
+      });
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const formData = new FormData();
+      formData.append('file', blob, filename);
+
+      fetch(`http://${ip}/upload`, {
+        method: 'POST',
+        body: formData,
+        mode: 'no-cors'
+      })
+      .then(() => {
+        alert('Plik został wysłany (jeśli serwer ESP32 go przyjął).');
+      })
+      .catch(err => {
+        console.error('Błąd połączenia z serwerem ESP32:', err);
+        alert('Błąd połączenia z serwerem ESP32: ' + err.message);
+      });
+    }
+  </script>
+  <div id="container">
+<button onclick="addStation()">➕ Dodaj stację</button>
+<br><br><p style='font-size: 0.8rem;'><a href='/menu'>Go Back</a></p>
+</div>
+</body>
+</html>

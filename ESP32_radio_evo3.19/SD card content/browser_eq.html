@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>EVO – Radiobrowser + EQ16</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg: #111;
+            --bg-alt: #181818;
+            --fg: #eee;
+            --accent: #4caf50;
+            --accent-soft: #2e7d32;
+            --border: #333;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+        }
+        header {
+            padding: 10px 16px;
+            background: #222;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 18px;
+        }
+        header .host {
+            font-size: 12px;
+            color: #aaa;
+        }
+        main {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            padding: 12px 16px 48px;
+        }
+        .left, .right {
+            background: var(--bg-alt);
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            padding: 10px;
+        }
+        .left {
+            flex: 2 1 380px;
+            min-width: 320px;
+        }
+        .right {
+            flex: 1 1 260px;
+            min-width: 250px;
+            max-width: 420px;
+        }
+
+        /* Radiobrowser część */
+        .search-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .search-bar input[type="text"],
+        .search-bar input[type="number"],
+        .search-bar select {
+            padding: 5px 7px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: #000;
+            color: var(--fg);
+            font-size: 13px;
+        }
+        .search-bar button {
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--accent-soft);
+            color: var(--fg);
+            cursor: pointer;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .search-bar button:hover {
+            background: var(--accent);
+        }
+        .status {
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 6px;
+        }
+        .results {
+            max-height: 60vh;
+            overflow-y: auto;
+            border-top: 1px solid var(--border);
+            margin-top: 6px;
+            padding-top: 4px;
+        }
+        .station {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 6px 4px;
+            border-bottom: 1px solid #222;
+        }
+        .station:nth-child(even) {
+            background: #151515;
+        }
+        .station-name {
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .station-meta {
+            font-size: 11px;
+            color: #aaa;
+        }
+        .station-url {
+            font-size: 11px;
+            word-break: break-all;
+            color: #ccc;
+        }
+        .station-actions {
+            margin-left: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .btn-small {
+            font-size: 11px;
+            padding: 3px 6px;
+            border-radius: 5px;
+            border: 1px solid var(--border);
+            background: #333;
+            color: var(--fg);
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .btn-small:hover { background: #444; }
+
+        /* Panel EQ16 */
+        .eq-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 6px;
+        }
+        .eq-header h2 {
+            font-size: 14px;
+            margin: 0;
+        }
+        .eq-toggle {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+        }
+        .eq-toggle input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        .eq-info {
+            font-size: 11px;
+            color: #aaa;
+            margin-top: 4px;
+            margin-bottom: 6px;
+        }
+
+        .eq-sliders {
+            display: flex;
+            gap: 6px;
+            justify-content: space-between;
+            overflow-x: auto;
+            padding-bottom: 4px;
+        }
+        .eq-band {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-size: 10px;
+            min-width: 22px;
+        }
+        .eq-band-label {
+            margin-top: 2px;
+        }
+        .eq-band-gain {
+            margin-top: 2px;
+            color: #ccc;
+        }
+
+        /* pionowe suwaki */
+        .eq-slider-wrap {
+            height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .eq-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 120px;          /* długość suwaka */
+            height: 6px;           /* grubość toru */
+            transform: rotate(-90deg);
+            background: #333;
+            border-radius: 4px;
+            outline: none;
+        }
+        .eq-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 10px;
+            height: 16px;
+            border-radius: 3px;
+            background: var(--accent);
+            cursor: pointer;
+        }
+        .eq-slider::-moz-range-thumb {
+            width: 10px;
+            height: 16px;
+            border-radius: 3px;
+            background: var(--accent);
+            cursor: pointer;
+            border: none;
+        }
+
+        .eq-buttons {
+            margin-top: 6px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            font-size: 12px;
+        }
+        .eq-buttons button {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: #333;
+            color: var(--fg);
+            cursor: pointer;
+        }
+        .eq-buttons button:hover {
+            background: #444;
+        }
+
+        footer {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            font-size: 11px;
+            background: #000;
+            border-top: 1px solid var(--border);
+            color: #777;
+            padding: 4px 10px;
+            display: flex;
+            justify-content: space-between;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 800px) {
+            main {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>EVO – Radiobrowser + EQ16</h1>
+    <div class="host">Host: <span id="hostInfo">?</span></div>
+</header>
+<main>
+    <section class="left">
+        <div class="search-bar">
+            <input id="q" type="text" placeholder="Nazwa / kraj / gatunek">
+            <input id="tag" type="text" placeholder="Tag (rock, 80s...)">
+            <input id="minBr" type="number" placeholder="Min kbps" min="0" step="32">
+            <select id="limit">
+                <option value="20">20</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+            </select>
+            <button id="btnSearch">Szukaj</button>
+        </div>
+        <div class="status" id="status">Podaj frazę i kliknij „Szukaj”.</div>
+        <div class="results" id="results"></div>
+    </section>
+
+    <aside class="right">
+        <div class="eq-header">
+            <h2>EQ16 – korektor graficzny</h2>
+            <label class="eq-toggle">
+                <input type="checkbox" id="eqEnabled">
+                <span>włączony</span>
+            </label>
+        </div>
+        <div class="eq-info">
+            16 pasm: 20 Hz – 20 kHz, zakres -18 … +18 dB. Zmiany wysyłane przez API do EVO.
+        </div>
+
+        <div class="eq-sliders" id="eqSliders">
+            <!-- dynamicznie generowane w JS -->
+        </div>
+
+        <div class="eq-buttons">
+            <button type="button" onclick="setAll(0)">Płasko (0 dB)</button>
+            <button type="button" onclick="setAll(-6)">Bas -6 dB</button>
+            <button type="button" onclick="setAll(6)">Bas +6 dB</button>
+            <button type="button" onclick="reloadFromDevice()">Odczytaj z EVO</button>
+        </div>
+    </aside>
+</main>
+
+<footer>
+    <span>Radiobrowser: publiczne API radio-browser.info</span>
+    <span>Korektor: /api/eq/* (patrz kod w main.cpp)</span>
+</footer>
+
+<script>
+    // ----- USTAWIENIA API DLA KOREKTORA -----
+    // Założone endpointy po stronie EVO:
+    //  GET  /api/eq/state        -> zwraca JSON { enabled:bool, gains:[16xfloat] }
+    //  GET  /api/eq/enable?on=0/1   -> włącza/wyłącza EQ
+    //  GET  /api/eq/band?band=X&gain=Y   -> ustawia pojedyncze pasmo (dB)
+    //  GET  /api/eq/set?g0=...&g1=...&...&g15=...  -> ustawia wszystkie pasma (opcjonalnie)
+    //
+    // Jeżeli zrobisz inne nazwy, zmień URL-e w funkcjach fetch* poniżej.
+
+    const hostSpan = document.getElementById('hostInfo');
+    hostSpan.textContent = window.location.hostname || 'localhost';
+
+    // ----- Radiobrowser proste wyszukiwanie -----
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+
+    document.getElementById('btnSearch').addEventListener('click', searchStations);
+    document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') searchStations(); });
+
+    const API_RB = 'https://de1.api.radio-browser.info/json/stations/search';
+
+    async function searchStations() {
+        const q = document.getElementById('q').value.trim();
+        const tag = document.getElementById('tag').value.trim();
+        const minBr = document.getElementById('minBr').value.trim();
+        const limit = document.getElementById('limit').value;
+
+        if (!q && !tag) {
+            statusEl.textContent = 'Podaj minimalnie nazwę lub tag.';
+            return;
+        }
+
+        statusEl.textContent = 'Szukam...';
+        resultsEl.innerHTML = '';
+
+        const params = new URLSearchParams();
+        if (q) params.append('name', q);
+        if (tag) params.append('tag', tag);
+        params.append('hidebroken', 'true');
+        params.append('limit', limit);
+        if (minBr) params.append('bitrate_min', minBr);
+
+        try {
+            const resp = await fetch(API_RB + '?' + params.toString());
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            if (!Array.isArray(data) || data.length === 0) {
+                statusEl.textContent = 'Brak wyników.';
+                return;
+            }
+            statusEl.textContent = 'Znaleziono ' + data.length + ' stacji.';
+            data.forEach(addStationRow);
+        } catch (e) {
+            console.error(e);
+            statusEl.textContent = 'Błąd pobierania danych: ' + e.message;
+        }
+    }
+
+    function addStationRow(s) {
+        const div = document.createElement('div');
+        div.className = 'station';
+
+        const metaBox = document.createElement('div');
+        metaBox.style.flex = '1';
+
+        const name = document.createElement('div');
+        name.className = 'station-name';
+        name.textContent = s.name || '(bez nazwy)';
+
+        const meta = document.createElement('div');
+        meta.className = 'station-meta';
+        const country = s.country || '';
+        const br = s.bitrate ? s.bitrate + ' kbps' : '';
+        const codec = s.codec || '';
+        meta.textContent = [country, br, codec].filter(Boolean).join(' • ');
+
+        const url = document.createElement('div');
+        url.className = 'station-url';
+        url.textContent = s.url_resolved || s.url || '';
+
+        metaBox.appendChild(name);
+        metaBox.appendChild(meta);
+        metaBox.appendChild(url);
+
+        const actions = document.createElement('div');
+        actions.className = 'station-actions';
+
+        const btnSet = document.createElement('button');
+        btnSet.className = 'btn-small';
+        btnSet.textContent = 'Ustaw w EVO';
+        btnSet.onclick = () => sendToEvo(s);
+        actions.appendChild(btnSet);
+
+        const btnCopy = document.createElement('button');
+        btnCopy.className = 'btn-small';
+        btnCopy.textContent = 'Kopiuj URL';
+        btnCopy.onclick = () => copyUrl(url.textContent);
+        actions.appendChild(btnCopy);
+
+        div.appendChild(metaBox);
+        div.appendChild(actions);
+        resultsEl.appendChild(div);
+    }
+
+    function copyUrl(url) {
+        if (!url) return;
+        navigator.clipboard.writeText(url).then(() => {
+            statusEl.textContent = 'Skopiowano URL do schowka.';
+        }).catch(() => {
+            statusEl.textContent = 'Nie udało się skopiować – zaznacz ręcznie.';
+        });
+    }
+
+    function sendToEvo(st) {
+        const url = st.url_resolved || st.url || '';
+        if (!url) return;
+        const name = st.name || 'Radio';
+        // DOPASUJ do tego, co masz w main.cpp (np. /update?url=&name=)
+        const href = '/update?url=' + encodeURIComponent(url) + '&name=' + encodeURIComponent(name);
+        statusEl.textContent = 'Wysyłam URL do EVO...';
+        fetch(href)
+            .then(() => statusEl.textContent = 'URL wysłany do EVO.')
+            .catch(() => statusEl.textContent = 'Błąd wysyłania URL do EVO.');
+    }
+
+    // ----- EQ16 – UI i API -----
+    const eqEnabledCheck = document.getElementById('eqEnabled');
+    const eqSlidersBox = document.getElementById('eqSliders');
+
+    // Zakładane częstotliwości środkowe (logarytmicznie 20..20000 Hz)
+    const EQ_BANDS = 16;
+    const freqs = [];
+    (function computeFreqs(){
+        const f0 = 20, f1 = 20000;
+        for (let i = 0; i < EQ_BANDS; i++) {
+            const t = i / (EQ_BANDS - 1);
+            const f = f0 * Math.pow(f1 / f0, t);
+            freqs.push(f);
+        }
+    })();
+
+    let eqGains = new Array(EQ_BANDS).fill(0);
+
+    function createEqUI() {
+        eqSlidersBox.innerHTML = '';
+        for (let i = 0; i < EQ_BANDS; i++) {
+            const bandDiv = document.createElement('div');
+            bandDiv.className = 'eq-band';
+
+            const wrap = document.createElement('div');
+            wrap.className = 'eq-slider-wrap';
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '-18';
+            slider.max = '18';
+            slider.step = '0.5';
+            slider.value = '0';
+            slider.className = 'eq-slider';
+            slider.dataset.band = String(i);
+
+            slider.addEventListener('change', onSliderChange);
+            slider.addEventListener('input', onSliderInput);
+
+            wrap.appendChild(slider);
+            bandDiv.appendChild(wrap);
+
+            const label = document.createElement('div');
+            label.className = 'eq-band-label';
+            const f = freqs[i];
+            let lbl;
+            if (f < 1000) {
+                lbl = Math.round(f) + ' Hz';
+            } else {
+                lbl = (f/1000).toFixed(1) + ' k';
+            }
+            label.textContent = lbl;
+            bandDiv.appendChild(label);
+
+            const gain = document.createElement('div');
+            gain.className = 'eq-band-gain';
+            gain.id = 'eqGain' + i;
+            gain.textContent = '0 dB';
+            bandDiv.appendChild(gain);
+
+            eqSlidersBox.appendChild(bandDiv);
+        }
+    }
+
+    function onSliderInput(e) {
+        const band = parseInt(e.target.dataset.band, 10);
+        const val = parseFloat(e.target.value);
+        const gainLabel = document.getElementById('eqGain' + band);
+        gainLabel.textContent = (val > 0 ? '+' : '') + val.toFixed(1) + ' dB';
+    }
+
+    function onSliderChange(e) {
+        const band = parseInt(e.target.dataset.band, 10);
+        const val = parseFloat(e.target.value);
+        eqGains[band] = val;
+        sendBandToDevice(band, val);
+    }
+
+    // Ustaw wszystkie pasma na tę samą wartość (np. płasko = 0 dB)
+    function setAll(v) {
+        eqGains = eqGains.map(() => v);
+        const sliders = eqSlidersBox.querySelectorAll('.eq-slider');
+        sliders.forEach((sl, i) => {
+            sl.value = v;
+            const lbl = document.getElementById('eqGain' + i);
+            lbl.textContent = (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+        });
+        sendAllToDevice();
+    }
+
+    // --- Wywołania API ---
+
+    async function reloadFromDevice() {
+        try {
+            const resp = await fetch('/api/eq/state');
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            eqEnabledCheck.checked = !!data.enabled;
+            if (Array.isArray(data.gains)) {
+                eqGains = data.gains.slice(0, EQ_BANDS).map(g => parseFloat(g) || 0);
+                const sliders = eqSlidersBox.querySelectorAll('.eq-slider');
+                sliders.forEach((sl, i) => {
+                    const g = eqGains[i] || 0;
+                    sl.value = g;
+                    const lbl = document.getElementById('eqGain' + i);
+                    lbl.textContent = (g > 0 ? '+' : '') + g.toFixed(1) + ' dB';
+                });
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Nie udalo sie odczytac ustawien EQ z /api/eq/state');
+        }
+    }
+
+    function sendBandToDevice(band, gain) {
+        const url = '/api/eq/band?band=' + encodeURIComponent(band) +
+                    '&gain=' + encodeURIComponent(gain.toFixed(2));
+        fetch(url).catch(() => {});
+    }
+
+    function sendAllToDevice() {
+        const params = new URLSearchParams();
+        eqGains.forEach((g, i) => {
+            params.append('g' + i, g.toFixed(2));
+        });
+        fetch('/api/eq/set?' + params.toString()).catch(() => {});
+    }
+
+    eqEnabledCheck.addEventListener('change', () => {
+        const on = eqEnabledCheck.checked ? 1 : 0;
+        fetch('/api/eq/enable?on=' + on).catch(() => {});
+    });
+
+    // inicjalizacja
+    createEqUI();
+    reloadFromDevice();  // spróbuj pobrać stan z urządzenia
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+// ############### TU ZACZYNA SIE DEFINICJA DLA PILOTa IR w standardzie NEC ############### //
+// pierwszy bajt adres, drugi komenda (B914 - przykład: adres B9 komenda 14)                //
+rcCmdVolumeUp   0xB914;  // Głosnosc +
+rcCmdVolumeDown 0xB915;  // Głośnosc -
+rcCmdArrowRight 0xB90B;  // strzałka w prawo - nastepna stacja
+rcCmdArrowLeft  0xB90A;  // strzałka w lewo - poprzednia stacja  
+rcCmdArrowUp    0xB987;  // strzałka w góre - lista stacji krok do gory
+rcCmdArrowDown  0xB986;  // strzałka w dół - lista stacj krok na dół
+rcCmdBack       0xB985;  // Przycisk powrotu
+rcCmdOk         0xB90E;  // Przycisk Ent - zatwierdzenie stacji
+rcCmdSrc        0xB913;  // Przełączanie źródła radio, odtwarzacz
+rcCmdMute       0xB916;  // Wyciszenie dzwieku
+rcCmdAud        0xB917;  // Equalizer dzwieku
+rcCmdDirect     0xB90F;  // Janość ekranu, dwa tryby 1/16 lub pełna janość    
+rcCmdBankMinus  0xB90C;  // Wysweitla wybór banku
+rcCmdBankPlus   0xB90D;  // Wysweitla wybór banku
+rcCmdRed        0xB988;  // Funkcja eksperymentalna 1
+rcCmdGreen      0xB992;  // Funkcja eksperymentalna 2 (VU tryb 1, VU tryb 2)
+rcCmdKey0       0xB900;  // Przycisk "0"
+rcCmdKey1       0xB901;  // Przycisk "1"
+rcCmdKey2       0xB902;  // Przycisk "2"
+rcCmdKey3       0xB903;  // Przycisk "3"
+rcCmdKey4       0xB904;  // Przycisk "4"
+rcCmdKey5       0xB905;  // Przycisk "5"
+rcCmdKey6       0xB906;  // Przycisk "6"
+rcCmdKey7       0xB907;  // Przycisk "7"
+rcCmdKey8       0xB908;  // Przycisk "8"
+rcCmdKey9       0xB909;  // Przycisk "9"

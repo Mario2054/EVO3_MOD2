@@ -1,0 +1,11 @@
+Copy content of this folder to your SD card.
+
+- ICO and PNG file give an option that you will have nice Icon on your web broswer when you radio page is open
+- Remote.txt file contains codes for remote controler RC-406 Kenwood
+- Remote2.txt file contains codes for cheap remote controler from Arduino sets
+- editor.html file is an Bank Editor page. 
+
+Remote.txt - creating your own file:
+Each code must be in format 0xAAFF [address code HEX][function code HEX]. 
+Program recognize 0x and read next four digits to assign them for specific functions.
+Do not skip not used codes. IF some fucntions will be not used assign them 0xFFFF code.
